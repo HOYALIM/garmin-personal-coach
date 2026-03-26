@@ -1,99 +1,154 @@
 # Garmin Personal Coach
 
-A daily coaching loop that turns Garmin recovery data + a structured training plan into a reliable coaching workflow.
+Your personal AI-powered endurance sports coach. Runs on your laptop, connects to Garmin Connect, adapts to your fitness — running, cycling, swimming, and triathlon.
 
-## What it does
+## What It Does
 
-Three-stage daily loop:
+```
+06:00  Morning Precheck     — Wake up, brief coaching pulse
+06:30  Final Check         — Final prescription based on fresh HRV/readiness data
+22:00  Evening Check-in    — Daily health Q&A + AI coaching advice
+Sunday Weekly Review        — Week summary + AI analysis + next week preview
+```
 
-| Time | Trigger | Output |
-|------|---------|--------|
-| 4:45 AM | cron | Early training brief (precheck) |
-| After wake | `일어났어` | Final workout prescription |
-| After workout | `운동 끝` | Log + calendar sync |
+**Hybrid intelligence**: Rule-based engine (CTL/ATL/TSB, periodization) ensures safety and consistency. AI enhances with personalized context, plan adjustments, and coaching language.
+
+## Supported Sports
+
+- 🏃 **Running** — pace zones, marathon/half/10K planning
+- 🚴 **Cycling** — power zones (FTP-based), endurance training
+- 🏊 **Swimming** — pace zones, threshold training
+- 🏅 **Triathlon** — multi-sport periodization, brick workouts
+
+## Quick Start
+
+```bash
+git clone https://github.com/HOYALIM/garmin-personal-coach.git
+cd garmin-personal-coach
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+# Run setup wizard
+python -m garmin_coach.setup_wizard
+
+# Connect Garmin
+pip install garth
+garth login your@email.com
+
+# Install scheduler
+python -m garmin_coach.scheduler --install-cron
+# Add output to crontab: crontab -e
+```
 
 ## Architecture
 
 ```
 garmin_coach/
-  models.py          — MorningResult, WorkoutLog dataclasses
-  plan.py            — training plan lookup
-  coach_engine.py    — scoring + coaching logic
-  activity_fetch.py  — Garmin data fetch (garth)
-  triggers.py        — intent detection
-  final_check.py     — post-wake final prescription
-  workout_review.py  — post-workout ingest + logging
-  calendar_sync.py   — CalDAV calendar sync
-  garmin_writeback.py — write-back feasibility
-  training_log.py    — manual log writer
-  morning_checkin.py — precheck (cron entry point)
-  dispatch.py        — CLI dispatcher
-  test_coach.py      — unit tests
+  profile_manager.py    — user profile, zones, config.yaml
+  training_load.py      — CTL/ATL/TSB, TRIMP, form analysis
+  periodization.py      — Base/Build/Peak/Race periodization
+  ai_coach.py          — OMO AI + rule-based fallback engine
+  plan.py              — training plan lookup
+  coach_engine.py       — scoring, recommendation logic
+  activity_fetch.py     — Garmin Connect data (garth)
+  calendar_sync.py      — CalDAV calendar sync
+  morning_checkin.py    — 06:00 precheck cronjob
+  final_check.py        — 06:30 final prescription
+  evening_checkin.py    — 22:00 health check + AI advice
+  weekly_review.py      — Sunday AI weekly review
+  scheduler.py          — user-time-based job runner
+  setup_wizard.py       — interactive CLI profile setup
+  dispatch.py           — CLI dispatcher
 ```
 
-## Setup
+## Key Concepts
 
-### 1. Requirements
+### Training Load (CTL / ATL / TSB)
+
+| Metric | Description |
+|--------|-------------|
+| **CTL** | Chronic Training Load — 42-day fitness trend |
+| **ATL** | Acute Training Load — 7-day fatigue |
+| **TSB** | Training Stress Balance — CTL − ATL (form) |
+| **TRIMP** | Training Impulse — session load score |
+
+TSB tells you when to push and when to back off:
+- `TSB > +25`: Detrained risk — add volume
+- `TSB +10 to +25`: Fresh (race day)
+- `TSB -10 to +10`: Training sweet spot
+- `TSB < -25`: Injury risk — recover
+
+### Periodization
+
+Four phases: **Base → Build → Peak → Race**
+- Recovery/deload weeks every 3–4 weeks
+- Volume increases gradually, intensity peaks near race
+- Rules-based: safe, consistent, explainable
+
+### AI Coach
+
+AI generates personalized advice based on your profile, load data, and self-reports. Three flexibility levels:
+- **Conservative**: Minor adjustments only (≤10% volume)
+- **Moderate**: Session swaps, intensity changes (≤20%)
+- **Flexible**: Week restructuring (≤40%)
+
+Falls back to rule-based engine if OMO AI is unavailable.
+
+## Setup Wizard Questions
+
+1. **About you** — name, age, sex, height, weight
+2. **Sports** — running, cycling, swimming, triathlon (multi-select)
+3. **Goal** — target event, date, fitness level, available days
+4. **Fitness assessment** — recent race times, FTP, HR baseline (or "auto" to fetch from Garmin)
+5. **Garmin auth** — garth login verification
+6. **Schedule** — per-job time config, enable/disable per job
+7. **AI coach** — tone, flexibility, notification method
+
+## Manual Commands
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+# Daily loop
+python -m garmin_coach.dispatch --message "일어났어"      # final check
+python -m garmin_coach.dispatch --message "운동 끝"        # post-workout
+
+# Individual cronjobs
+python -m garmin_coach.morning_checkin --date 2026-03-25
+python -m garmin_coach.evening_checkin --date 2026-03-25  # interactive
+python -m garmin_coach.evening_checkin --date 2026-03-25 --auto  # no questions
+python -m garmin_coach.weekly_review  # current week
+
+# Profile
+python -m garmin_coach.profile_manager  # show current profile
+python -m garmin_coach.setup_wizard  # reconfigure
+
+# Scheduler
+python -m garmin_coach.scheduler --dispatch      # run due jobs now
+python -m garmin_coach.scheduler --install-cron # show cron line
 ```
 
-### 2. Garmin Authentication
+## Configuration
 
-```bash
-pip install garth
-garth login your@email.com
-# Follow OAuth flow — token saved to ~/.garth
+Profile stored at `~/.config/garmin_coach/config.yaml`.
+
+Key environment variables:
+
+| Variable | Description |
+|----------|-------------|
+| `GARMIN_PLAN_START_DATE` | Training plan start (default: from config) |
+| `GARMIN_RACE_DATE` | Target race date |
+| `OMO_PATH` | Path to OpenCode binary (default: `omo`) |
+| `CALDAV_URL`, `CALDAV_USER`, `CALDAV_PASS` | Calendar sync (optional) |
+
+## Data Files
+
 ```
-
-### 3. Calendar Sync (optional)
-
-CalDAV setup — see [docs/CALDAV_SETUP.md](docs/CALDAV_SETUP.md)
-
-### 4. Configure Plan Start Date
-
-```bash
-export GARMIN_PLAN_START_DATE="2026-03-23"  # your training plan start
-export GARMIN_RACE_DATE="2026-07-01"          # optional
+~/.config/garmin_coach/config.yaml   # user profile
+data/training_load.json              # CTL/ATL/TSB time series
+data/snapshots/YYYY-MM-DD.json       # morning coaching results
+data/training_logs/YYYY-MM-DD.md      # human-readable workout log
+data/training_log_json/YYYY-MM-DD.json # machine-readable workout log
+data/evening_data/YYYY-MM-DD.json    # evening self-reports
 ```
-
-## Usage
-
-```bash
-# Precheck (cron)
-python morning_checkin.py --phase precheck
-
-# Final check
-python dispatch.py --message "일어났어"
-
-# Post-workout
-python dispatch.py --message "운동 끝"
-
-# Manual log (no Garmin activity)
-python training_log.py \
-  --date 2026-03-25 \
-  --completed "7 km easy" \
-  --distance-km 7.1 \
-  --source manual
-```
-
-## Trigger Phrases
-
-| Trigger | Phrases |
-|---------|---------|
-| Wake (final check) | `일어났어`, `기상` |
-| Workout complete | `운동 끝`, `러닝 끝`, `오늘 운동했어` |
-
-## Output Files
-
-| Path | Description |
-|------|-------------|
-| `data/snapshots/YYYY-MM-DD.json` | Morning coaching result |
-| `data/training_logs/YYYY-MM-DD.md` | Workout log (human) |
-| `data/training_log_json/YYYY-MM-DD.json` | Workout log (machine) |
 
 ## Testing
 
@@ -104,9 +159,7 @@ python -m pytest tests/ -v
 
 ## Garmin Write-Back
 
-Activity note write-back is **not implemented**. garth is read-only. garminconnect supports limited write-back but requires separate email/password auth.
-
-Use local logs + calendar as durable truth.
+Activity annotation write-back is **not implemented**. garth is read-only. The recommended workflow: local logs + calendar as durable truth.
 
 ## License
 
