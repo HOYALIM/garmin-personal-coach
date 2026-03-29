@@ -1,5 +1,3 @@
-"""MCP server main entry point using stdio transport."""
-
 import json
 import sys
 
@@ -8,7 +6,7 @@ from mcp.types import Tool, TextContent
 from mcp.server.stdio import stdio_server
 
 from garmin_coach._version import __version__
-from mcp.server import TOOLS, handle_tool_call
+from mcp_server.server import TOOLS, handle_tool_call
 
 
 async def main():
@@ -30,7 +28,13 @@ async def main():
         result = handle_tool_call(name, arguments)
         return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
 
-    await stdio_server.run(server)
+    options = server.create_initialization_options()
+    async with stdio_server() as (read_stream, write_stream):
+        await server.run(
+            read_stream,
+            write_stream,
+            options,
+        )
 
 
 if __name__ == "__main__":

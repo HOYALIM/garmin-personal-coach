@@ -64,7 +64,7 @@ Issues = "https://github.com/HOYALIM/garmin-personal-coach/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["garmin_coach*", "mcp*"]
+include = ["garmin_coach*", "mcp_server*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
