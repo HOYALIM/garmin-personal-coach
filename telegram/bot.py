@@ -1,5 +1,3 @@
-"""Telegram bot for Garmin Personal Coach with conversation state."""
-
 import json
 import logging
 import os
@@ -25,6 +23,7 @@ except ImportError:
 
 from garmin_coach.handler import process_message
 from garmin_coach._version import __version__
+from garmin_coach.i18n import Locale, detect_locale, get_i18n
 
 
 logging.basicConfig(level=logging.INFO)
@@ -126,98 +125,101 @@ class CoachBot:
         self.app.add_handler(conv_handler)
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
 
+    def _get_locale(self, update: Update) -> Locale:
+        user = update.effective_user
+        if user and user.language_code:
+            code = user.language_code.split("-")[0].lower()
+            if code in ("ko", "zh"):
+                return Locale(code)
+        return Locale.EN
+
+    def _reply(self, update: Update, text: str):
+        return update.message.reply_text(text)
+
     async def cmd_start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         name = update.effective_user.first_name
+        locale = self._get_locale(update)
 
-        self.states.update(user_id, name=name, welcome_time=datetime.now().isoformat())
-
-        await update.message.reply_text(
-            f"안녕하세요, {name}! 🏃\n\n"
-            f"당신의 퍼스널 코치입니다!\n\n"
-            f"도움말: /help\n"
-            f"컨디션: /status\n"
-            f"일정: /plan\n"
-            f"운동 기록: /log"
+        self.states.update(
+            user_id, name=name, locale=locale.value, welcome_time=datetime.now().isoformat()
         )
+
+        i18n = get_i18n(locale)
+        await self._reply(update, i18n.t("start.welcome").format(name=name))
 
     async def cmd_help(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text(
-            "📚 사용 가능한 명령어:\n\n"
-            "/start - 시작\n"
-            "/help - 도움말\n"
-            "/status - 오늘 컨디션 확인\n"
-            "/plan - 오늘的训练 일정\n"
-            "/log - 운동 기록하기\n"
-            "/profile - 내 프로필\n"
-            "/setup - 설정\n\n"
-            "💬 또는 그냥 메시지를 보내세요!\n"
-            "예: '오늘 컨디션 어때?' '운동 끝' '피곤해'"
-        )
+        locale = self._get_locale(update)
+        i18n = get_i18n(locale)
+        await self._reply(update, i18n.t("help.text"))
 
     async def cmd_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
-            response = process_message("컨디션 어때?")
-            await update.message.reply_text(response)
+            response = process_message(" 컨디션 어때?")
+            await self._reply(update, response)
         except Exception as e:
             logger.error(f"Status command error: {e}")
-            await update.message.reply_text("죄송합니다. 데이터를 불러오는데 문제가 발생했어요.")
+            locale = self._get_locale(update)
+            await self._reply(update, get_i18n(locale).t("error.status"))
 
     async def cmd_plan(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
-            response = process_message("오늘的训练")
-            await update.message.reply_text(response)
+            response = process_message(" 오늘 일정")
+            await self._reply(update, response)
         except Exception as e:
             logger.error(f"Plan command error: {e}")
-            await update.message.reply_text("죄송합니다. 일정을 불러오는데 문제가 발생했어요.")
+            locale = self._get_locale(update)
+            await self._reply(update, get_i18n(locale).t("error.plan"))
 
     async def cmd_profile(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             from garmin_coach.wizard import load_config
 
             config = load_config()
+            locale = self._get_locale(update)
+            i18n = get_i18n(locale)
 
-            name = config.get("name", "설정되지 않음")
+            name = config.get("name", i18n.t("profile.not_set"))
             age = config.get("age", "?")
-            sports = ", ".join(config.get("sports", [])) or "설정되지 않음"
+            sports = ", ".join(config.get("sports", [])) or i18n.t("profile.not_set")
             fitness = config.get("fitness_level", "?")
 
             response = (
-                f"📋 내 프로필\n\n"
-                f"이름: {name}\n"
-                f"나이: {age}\n"
-                f"종목: {sports}\n"
-                f"피트니스: {fitness}\n\n"
+                f"{i18n.t('profile.title')}\n\n"
+                f"{i18n.t('profile.name')}: {name}\n"
+                f"{i18n.t('profile.age')}: {age} {i18n.t('profile.years')}\n"
+                f"{i18n.t('profile.sports')}: {sports}\n"
+                f"{i18n.t('profile.fitness')}: {fitness}\n\n"
                 f"설정 변경: /setup"
             )
-            await update.message.reply_text(response)
+            await self._reply(update, response)
         except Exception as e:
             logger.error(f"Profile command error: {e}")
-            await update.message.reply_text("프로필을 불러오는데 문제가 발생했어요.")
+            locale = self._get_locale(update)
+            await self._reply(update, get_i18n(locale).t("error.profile"))
 
     async def cmd_setup(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text(
-            "⚙️ 설정은 터미널에서 진행해주세요:\n\n"
-            "pip install garmin-personal-coach\n"
-            "garmin-coach setup\n\n"
-            "설정이 완료되면 다시 /start 을 눌러주세요."
-        )
+        locale = self._get_locale(update)
+        i18n = get_i18n(locale)
+        await self._reply(update, i18n.t("setup.prompt"))
 
     async def cmd_log_start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         self.states.update(user_id, log_state="workout_type")
 
-        await update.message.reply_text(
-            "🏃 어떤 운동을 했나요?\n\n예: 런닝, 사이클링, 수영, 웨이트 등"
-        )
+        locale = self._get_locale(update)
+        i18n = get_i18n(locale)
+        await self._reply(update, i18n.t("log.workout_type"))
         return self.ASK_WORKOUT_TYPE
 
     async def ask_workout_type(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         workout_type = update.message.text
+        locale = self._get_locale(update)
 
         self.states.update(user_id, workout_type=workout_type, log_state="duration")
-        await update.message.reply_text(f"✅ {workout_type} - 몇 분 했나요?")
+        i18n = get_i18n(locale)
+        await self._reply(update, i18n.t("log.duration").format(type=workout_type))
         return self.ASK_DURATION
 
     async def ask_duration(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -225,7 +227,9 @@ class CoachBot:
         duration = update.message.text
 
         self.states.update(user_id, duration=duration, log_state="feeling")
-        await update.message.reply_text(f"✅ {duration}분 - 컨디션은 어때요? (1-5)")
+        locale = self._get_locale(update)
+        i18n = get_i18n(locale)
+        await self._reply(update, i18n.t("log.feeling").format(duration=duration))
         return self.ASK_FEELING
 
     async def ask_feeling(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -233,25 +237,31 @@ class CoachBot:
         state = self.states.get(user_id)
         feeling = update.message.text
 
-        workout_type = state.get("workout_type", "운동")
+        workout_type = state.get("workout_type", "Workout")
         duration = state.get("duration", "0")
 
         self.states.clear(user_id)
 
-        message = f"운동 완료: {workout_type} {duration}분, 컨디션 {feeling}/5"
+        message = f"Workout complete: {workout_type} {duration} min, feeling {feeling}/5"
         try:
             response = process_message(message)
-            await update.message.reply_text(f"✅ 기록 완료!\n\n{response}")
+            locale = self._get_locale(update)
+            i18n = get_i18n(locale)
+            await self._reply(
+                update, i18n.t("log.complete_with_response").format(response=response)
+            )
         except Exception as e:
             logger.error(f"Log error: {e}")
-            await update.message.reply_text("✅ 기록 완료!")
+            locale = self._get_locale(update)
+            await self._reply(update, get_i18n(locale).t("log.complete"))
 
         return ConversationHandler.END
 
     async def cmd_cancel(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         self.states.clear(user_id)
-        await update.message.reply_text("취소했어요. 다른 명령어를 입력해주세요.")
+        locale = self._get_locale(update)
+        await self._reply(update, get_i18n(locale).t("cancel"))
         return ConversationHandler.END
 
     async def handle_message(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -261,12 +271,11 @@ class CoachBot:
         try:
             self.states.update(user_id, last_message=user_message)
             response = process_message(user_message)
-            await update.message.reply_text(response)
+            await self._reply(update, response)
         except Exception as e:
             logger.error(f"Message handling error: {e}")
-            await update.message.reply_text(
-                "죄송합니다. 일시적인 문제가 발생했어요. 다시 시도해주세요."
-            )
+            locale = self._get_locale(update)
+            await self._reply(update, get_i18n(locale).t("error.generic"))
 
     def run(self):
         logger.info("Coach bot starting...")

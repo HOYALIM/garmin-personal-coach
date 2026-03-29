@@ -6,6 +6,11 @@ from typing import Optional
 from garmin_coach.handler.intent import Intent, detect_intent
 from garmin_coach.handler.templates import ResponseTemplate
 from garmin_coach.training_load_manager import get_training_load_manager
+from garmin_coach.rate_limit import HANDLER_LIMITER
+
+
+class RateLimitError(Exception):
+    pass
 
 
 def _load_config() -> dict:
@@ -90,7 +95,15 @@ class MessageHandler:
                 except Exception:
                     self._ai_coach = None
 
-    def handle(self, message: str) -> str:
+    def handle(self, message: str, client_key: str = "default") -> str:
+        if not HANDLER_LIMITER.is_allowed(client_key):
+            remaining = HANDLER_LIMITER.get_remaining(client_key)
+            reset_time = HANDLER_LIMITER.get_reset_time(client_key)
+            raise RateLimitError(
+                f"Rate limit exceeded. {remaining} requests remaining. "
+                f"Try again in {int(reset_time)} seconds."
+            )
+
         context = _get_real_context()
         context.update(self.user_context)
         intent = detect_intent(message)

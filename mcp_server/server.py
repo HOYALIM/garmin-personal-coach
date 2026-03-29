@@ -4,6 +4,7 @@ from typing import Any
 
 from garmin_coach._version import __version__
 from garmin_coach.training_load_manager import get_training_load_manager
+from garmin_coach.rate_limit import MCP_LIMITER
 
 
 # JSON-RPC standard error codes
@@ -19,6 +20,7 @@ ERROR_PROFILE_NOT_FOUND = 1002
 ERROR_GARMIN_NOT_CONNECTED = 1003
 ERROR_AI_NOT_CONFIGURED = 1004
 ERROR_VALIDATION_FAILED = 1005
+ERROR_RATE_LIMITED = 1006
 
 
 class CoachError(Exception):
@@ -230,7 +232,16 @@ TOOL_HANDLERS = {
 }
 
 
-def handle_tool_call(name: str, arguments: dict) -> dict:
+def handle_tool_call(name: str, arguments: dict, client_id: str = "default") -> dict:
+    if not MCP_LIMITER.is_allowed(client_id):
+        remaining = MCP_LIMITER.get_remaining(client_id)
+        reset_time = MCP_LIMITER.get_reset_time(client_id)
+        return {
+            "status": "error",
+            "code": ERROR_RATE_LIMITED,
+            "message": f"Rate limit exceeded. {remaining} requests remaining. Try again in {int(reset_time)} seconds.",
+        }
+
     if name not in TOOL_HANDLERS:
         return {
             "status": "error",
