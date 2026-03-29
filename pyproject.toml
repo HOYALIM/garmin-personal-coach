@@ -1,0 +1,81 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "garmin-personal-coach"
+version = "0.1.0"
+description = "Your personal AI-powered endurance sports coach"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "HO YALIM", email = "hoyalim@example.com"}
+]
+keywords = ["fitness", "coaching", "garmin", "running", "cycling", "swimming", "triathlon", "training"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "garth>=0.4.0",
+    "pyyaml>=6.0",
+    "caldav>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+mcp = [
+    "mcp>=1.0.0",
+]
+telegram = [
+    "python-telegram-bot>=20.0",
+]
+ai = [
+    "openai>=1.0.0",
+    "anthropic>=0.18.0",
+]
+all = [
+    "mcp>=1.0.0",
+    "requests>=2.0.0",
+    "python-telegram-bot>=20.0",
+    "openai>=1.0.0",
+    "anthropic>=0.18.0",
+]
+
+[project.scripts]
+garmin-coach = "garmin_coach.cli:main"
+gc = "garmin_coach.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/HOYALIM/garmin-personal-coach"
+Documentation = "https://github.com/HOYALIM/garmin-personal-coach#readme"
+Repository = "https://github.com/HOYALIM/garmin-personal-coach"
+Issues = "https://github.com/HOYALIM/garmin-personal-coach/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["garmin_coach*", "mcp*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
