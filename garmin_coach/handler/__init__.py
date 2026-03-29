@@ -15,10 +15,30 @@ def _load_config() -> dict:
         config_path = os.path.expanduser("~/.config/garmin_coach/config.yaml")
         if os.path.exists(config_path):
             with open(config_path) as f:
-                return yaml.safe_load(f) or {}
+                config = yaml.safe_load(f) or {}
+                return _normalize_config(config)
     except Exception:
         pass
     return {}
+
+
+def _normalize_config(config: dict) -> dict:
+    """Normalize config to unified format (support both legacy and ProfileManager format)."""
+    if "profile" in config:
+        return {
+            "name": config["profile"].get("name", ""),
+            "age": config["profile"].get("age", 30),
+            "setup_complete": True,
+            "garmin_connected": config.get("garmin", {}).get("connected", False),
+            "ai": {
+                "enabled": config.get("ai_coach", {}).get("enabled", False),
+                "api_key": config.get("ai_coach", {}).get("api_key"),
+                "tone": config.get("ai_coach", {}).get("tone", "encouraging"),
+                "flexibility": config.get("ai_coach", {}).get("flexibility", "moderate"),
+            },
+            "profile": config.get("profile", {}),
+        }
+    return config
 
 
 def _get_real_context() -> dict:

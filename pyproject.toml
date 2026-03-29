@@ -35,7 +35,7 @@ dev = [
     "pytest-cov>=4.0.0",
 ]
 mcp = [
-    "mcp>=1.0.0",
+    "mcp>=1.1.0",
 ]
 telegram = [
     "python-telegram-bot>=20.0",
@@ -45,7 +45,7 @@ ai = [
     "anthropic>=0.18.0",
 ]
 all = [
-    "mcp>=1.0.0",
+    "mcp>=1.1.0",
     "requests>=2.0.0",
     "python-telegram-bot>=20.0",
     "openai>=1.0.0",

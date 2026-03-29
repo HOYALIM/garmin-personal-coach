@@ -163,9 +163,7 @@ class ScheduleConfig:
     morning_checkin: dict[str, Any] = field(
         default_factory=lambda: {"enabled": True, "time": "06:00"}
     )
-    final_check: dict[str, Any] = field(
-        default_factory=lambda: {"enabled": True, "time": "06:30"}
-    )
+    final_check: dict[str, Any] = field(default_factory=lambda: {"enabled": True, "time": "06:30"})
     evening_checkin: dict[str, Any] = field(
         default_factory=lambda: {"enabled": True, "time": "22:00"}
     )
@@ -179,13 +177,9 @@ class ScheduleConfig:
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ScheduleConfig:
         return cls(
-            morning_checkin=d.get(
-                "morning_checkin", {"enabled": True, "time": "06:00"}
-            ),
+            morning_checkin=d.get("morning_checkin", {"enabled": True, "time": "06:00"}),
             final_check=d.get("final_check", {"enabled": True, "time": "06:30"}),
-            evening_checkin=d.get(
-                "evening_checkin", {"enabled": True, "time": "22:00"}
-            ),
+            evening_checkin=d.get("evening_checkin", {"enabled": True, "time": "22:00"}),
             weekly_review=d.get(
                 "weekly_review", {"enabled": True, "day": "sunday", "time": "21:00"}
             ),
@@ -200,6 +194,7 @@ class AICoachConfig:
     can_modify_plan: bool = True
     notification_method: NotificationMethod = NotificationMethod.PRINT
     notification_target: str | None = None
+    api_key: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -213,9 +208,7 @@ class AICoachConfig:
         d = dict(d)
         d["flexibility"] = AIFlexibility(d.get("flexibility", "moderate"))
         d["tone"] = AITone(d.get("tone", "encouraging"))
-        d["notification_method"] = NotificationMethod(
-            d.get("notification_method", "print")
-        )
+        d["notification_method"] = NotificationMethod(d.get("notification_method", "print"))
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
@@ -337,9 +330,7 @@ class TrainingZones:
         return {
             "hr": self.hr.to_dict() if self.hr else None,
             "running_pace": self.running_pace.to_dict() if self.running_pace else None,
-            "cycling_power": self.cycling_power.to_dict()
-            if self.cycling_power
-            else None,
+            "cycling_power": self.cycling_power.to_dict() if self.cycling_power else None,
             "swimming": self.swimming.to_dict() if self.swimming else None,
         }
 
@@ -353,9 +344,7 @@ class ProfileManager:
     DEFAULT_CONFIG_PATH = Path("~/.config/garmin_coach/config.yaml").expanduser()
 
     def __init__(self, config_path: str | Path | None = None) -> None:
-        self.config_path = (
-            Path(config_path) if config_path else self.DEFAULT_CONFIG_PATH
-        )
+        self.config_path = Path(config_path) if config_path else self.DEFAULT_CONFIG_PATH
 
     # ── Load / Save ──────────────────────────────────────────────────────────
 
@@ -381,6 +370,7 @@ class ProfileManager:
                 sort_keys=False,
                 allow_unicode=True,
             )
+        self.config_path.chmod(0o600)
 
     def exists(self) -> bool:
         """Check if profile exists."""
@@ -408,16 +398,12 @@ class ProfileManager:
         if p.available_days < 1 or p.available_days > 7:
             errors.append(f"profile.available_days must be 1-7, got {p.available_days}")
         if p.max_weekly_hours < 1 or p.max_weekly_hours > 40:
-            errors.append(
-                f"profile.max_weekly_hours must be 1-40, got {p.max_weekly_hours}"
-            )
+            errors.append(f"profile.max_weekly_hours must be 1-40, got {p.max_weekly_hours}")
         if p.goal_date:
             try:
                 date.fromisoformat(p.goal_date)
             except ValueError:
-                errors.append(
-                    f"profile.goal_date must be ISO format, got {p.goal_date!r}"
-                )
+                errors.append(f"profile.goal_date must be ISO format, got {p.goal_date!r}")
 
         # Validate race times format
         for field_name, value in [
@@ -432,12 +418,8 @@ class ProfileManager:
                     f"'auto', 'unknown', or HH:MM/SS format, got {value!r}"
                 )
 
-        if f.cycling_ftp_w is not None and (
-            f.cycling_ftp_w < 50 or f.cycling_ftp_w > 500
-        ):
-            errors.append(
-                f"fitness.cycling_ftp_w must be 50-500W, got {f.cycling_ftp_w}"
-            )
+        if f.cycling_ftp_w is not None and (f.cycling_ftp_w < 50 or f.cycling_ftp_w > 500):
+            errors.append(f"fitness.cycling_ftp_w must be 50-500W, got {f.cycling_ftp_w}")
         if f.resting_hr is not None and (f.resting_hr < 30 or f.resting_hr > 120):
             errors.append(f"fitness.resting_hr must be 30-120 bpm, got {f.resting_hr}")
         if f.max_hr is not None and (f.max_hr < 120 or f.max_hr > 220):
@@ -447,9 +429,7 @@ class ProfileManager:
         for job in ["morning_checkin", "final_check", "evening_checkin"]:
             entry = getattr(user_profile.schedule, job)
             if entry.get("enabled") and not _validate_time(entry.get("time", "")):
-                errors.append(
-                    f"schedule.{job}.time must be HH:MM, got {entry.get('time')!r}"
-                )
+                errors.append(f"schedule.{job}.time must be HH:MM, got {entry.get('time')!r}")
 
         wr = user_profile.schedule.weekly_review
         if wr.get("enabled") and not _validate_time(wr.get("time", "")):
@@ -463,9 +443,7 @@ class ProfileManager:
             "saturday",
             "sunday",
         ]:
-            errors.append(
-                f"schedule.weekly_review.day must be day name, got {wr.get('day')!r}"
-            )
+            errors.append(f"schedule.weekly_review.day must be day name, got {wr.get('day')!r}")
 
         return errors
 
@@ -503,9 +481,7 @@ class ProfileManager:
             z5_max=max_hr,
         )
 
-    def calculate_running_pace_zones(
-        self, user_profile: UserProfile
-    ) -> PaceZones | None:
+    def calculate_running_pace_zones(self, user_profile: UserProfile) -> PaceZones | None:
         """Calculate running pace zones from known race times.
 
         Uses Jack Daniels VDOT approximation.
@@ -524,9 +500,7 @@ class ProfileManager:
             if time_str and time_str not in ("auto", "unknown", ""):
                 seconds = _parse_duration(time_str)
                 if seconds:
-                    km = {"5k": 5.0, "10k": 10.0, "half": 21.0975, "marathon": 42.195}[
-                        race
-                    ]
+                    km = {"5k": 5.0, "10k": 10.0, "half": 21.0975, "marathon": 42.195}[race]
                     pace = seconds / km
                     if best_pace_per_km is None or pace < best_pace_per_km:
                         best_pace_per_km = pace
@@ -559,9 +533,7 @@ class ProfileManager:
             race_pace=pace_str(race_pace),
         )
 
-    def calculate_cycling_power_zones(
-        self, user_profile: UserProfile
-    ) -> PowerZones | None:
+    def calculate_cycling_power_zones(self, user_profile: UserProfile) -> PowerZones | None:
         """Calculate cycling power zones from FTP.
 
         Returns None if FTP not known.

@@ -1,22 +1,64 @@
-"""Simple AI coach wrapper with API key support."""
-
 import json
 import os
 from typing import Optional
 
 
+# Stable default models (tested and working)
+DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-20250514"
+
+# Model aliases for user convenience
+MODEL_ALIASES = {
+    "gpt-4o": "gpt-4o",
+    "gpt-4o-mini": "gpt-4o-mini",
+    "gpt-4-turbo": "gpt-4-turbo",
+    "claude-sonnet": "claude-sonnet-4-20250514",
+    "claude-opus": "claude-opus-3-5-20250514",
+    "claude-haiku": "claude-haiku-3-5-20250514",
+}
+
+
 class AICoach:
-    def __init__(self, api_key: Optional[str] = None, model: str = "gpt-4o-mini"):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: Optional[str] = None,
+        provider: Optional[str] = None,
+    ):
         self.api_key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
-        self.model = model
+
+        # Detect provider first (respects explicit provider if given)
+        self._explicit_provider = provider
         self.provider = self._detect_provider()
 
+        # Resolve model: explicit > env > default
+        self.model = self._resolve_model(model)
+
+        # Track actual model used (for debugging/logging)
+        self._model_resolved = self.model
+
     def _detect_provider(self) -> str:
-        if os.getenv("OPENAI_API_KEY"):
-            return "openai"
+        if self._explicit_provider:
+            return self._explicit_provider
+
+        # Check env vars
         if os.getenv("ANTHROPIC_API_KEY"):
             return "anthropic"
+        if os.getenv("OPENAI_API_KEY"):
+            return "openai"
         return "none"
+
+    def _resolve_model(self, user_model: Optional[str]) -> str:
+        if user_model:
+            # Expand alias if exists
+            return MODEL_ALIASES.get(user_model, user_model)
+
+        # Use provider defaults
+        if self.provider == "openai":
+            return DEFAULT_OPENAI_MODEL
+        if self.provider == "anthropic":
+            return DEFAULT_ANTHROPIC_MODEL
+        return ""
 
     def generate_response(self, message: str, context: dict) -> Optional[str]:
         if not self.api_key:
@@ -93,7 +135,7 @@ Keep responses concise (2-3 sentences for quick questions, up to 1 paragraph for
 
             client = anthropic.Anthropic(api_key=self.api_key)
             response = client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=self.model,
                 max_tokens=500,
                 system=system,
                 messages=[{"role": "user", "content": user}],

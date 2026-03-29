@@ -1,11 +1,61 @@
-"""MCP server for Garmin Personal Coach using JSON-RPC over stdio."""
-
 import json
 import sys
 from typing import Any
 
 from garmin_coach._version import __version__
 from garmin_coach.training_load_manager import get_training_load_manager
+
+
+# JSON-RPC standard error codes
+ERROR_PARSE_ERROR = -32700
+ERROR_INVALID_REQUEST = -32600
+ERROR_METHOD_NOT_FOUND = -32601
+ERROR_INVALID_PARAMS = -32602
+ERROR_INTERNAL_ERROR = -32603
+
+# Application-specific error codes (1000-1999)
+ERROR_TRAINING_LOAD = 1001
+ERROR_PROFILE_NOT_FOUND = 1002
+ERROR_GARMIN_NOT_CONNECTED = 1003
+ERROR_AI_NOT_CONFIGURED = 1004
+ERROR_VALIDATION_FAILED = 1005
+
+
+class CoachError(Exception):
+    code: int = ERROR_INTERNAL_ERROR
+    message: str = "Internal error"
+
+    def to_dict(self) -> dict:
+        return {
+            "code": self.code,
+            "message": self.message,
+            "data": getattr(self, "data", None),
+        }
+
+
+class TrainingLoadError(CoachError):
+    code = ERROR_TRAINING_LOAD
+    message = "Training load data unavailable"
+
+
+class ProfileNotFoundError(CoachError):
+    code = ERROR_PROFILE_NOT_FOUND
+    message = "User profile not found"
+
+
+class GarminNotConnectedError(CoachError):
+    code = ERROR_GARMIN_NOT_CONNECTED
+    message = "Garmin account not connected"
+
+
+class AINotConfiguredError(CoachError):
+    code = ERROR_AI_NOT_CONFIGURED
+    message = "AI not configured"
+
+
+class ValidationError(CoachError):
+    code = ERROR_VALIDATION_FAILED
+    message = "Validation failed"
 
 
 def get_training_status() -> dict:
@@ -16,8 +66,10 @@ def get_training_status() -> dict:
             "status": "success",
             "data": context,
         }
+    except TrainingLoadError as e:
+        return {"status": "error", "code": e.code, "message": e.message}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "code": ERROR_TRAINING_LOAD, "message": str(e)}
 
 
 def get_user_profile() -> dict:
@@ -25,6 +77,12 @@ def get_user_profile() -> dict:
         from garmin_coach.wizard import load_config
 
         config = load_config()
+        if not config:
+            return {
+                "status": "error",
+                "code": ERROR_PROFILE_NOT_FOUND,
+                "message": "Run 'garmin-coach setup' first",
+            }
         return {
             "status": "success",
             "data": {
@@ -36,7 +94,7 @@ def get_user_profile() -> dict:
             },
         }
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "code": ERROR_PROFILE_NOT_FOUND, "message": str(e)}
 
 
 def get_recent_activities(days: int = 7) -> dict:
@@ -66,7 +124,7 @@ def get_recent_activities(days: int = 7) -> dict:
             "data": activities,
         }
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "code": ERROR_TRAINING_LOAD, "message": str(e)}
 
 
 def handle_natural_language(message: str) -> dict:
@@ -79,7 +137,7 @@ def handle_natural_language(message: str) -> dict:
             "response": response,
         }
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "code": ERROR_INTERNAL_ERROR, "message": str(e)}
 
 
 def get_training_plan() -> dict:
@@ -104,7 +162,7 @@ def get_training_plan() -> dict:
             },
         }
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "code": ERROR_TRAINING_LOAD, "message": str(e)}
 
 
 TOOLS = [
@@ -174,7 +232,11 @@ TOOL_HANDLERS = {
 
 def handle_tool_call(name: str, arguments: dict) -> dict:
     if name not in TOOL_HANDLERS:
-        return {"status": "error", "message": f"Unknown tool: {name}"}
+        return {
+            "status": "error",
+            "code": ERROR_METHOD_NOT_FOUND,
+            "message": f"Unknown tool: {name}",
+        }
 
     handler = TOOL_HANDLERS[name]
 
@@ -242,9 +304,11 @@ def main():
                 pass
 
         except json.JSONDecodeError:
-            send_error(None, -32700, "Parse error")
+            send_error(None, ERROR_PARSE_ERROR, "Invalid JSON")
         except Exception as e:
-            send_error(request_id if "request_id" in locals() else None, -32603, str(e))
+            send_error(
+                request_id if "request_id" in locals() else None, ERROR_INTERNAL_ERROR, str(e)
+            )
 
 
 if __name__ == "__main__":

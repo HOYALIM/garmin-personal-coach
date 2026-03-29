@@ -5,30 +5,24 @@ from typing import Optional
 
 import yaml
 
+from garmin_coach.profile_manager import (
+    ProfileManager,
+    ProfileData,
+    FitnessData,
+    GarminConfig,
+    AICoachConfig,
+    ScheduleConfig,
+    UserProfile,
+    Sport,
+    FitnessLevel,
+    Sex,
+    AIFlexibility,
+    AITone,
+)
+
 
 CONFIG_DIR = os.path.expanduser("~/.config/garmin_coach")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.yaml")
-
-
-def ensure_config_dir():
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-
-
-def load_config() -> dict:
-    ensure_config_dir()
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE) as f:
-                return yaml.safe_load(f) or {}
-        except Exception:
-            return {}
-    return {}
-
-
-def save_config(config: dict):
-    ensure_config_dir()
-    with open(CONFIG_FILE, "w") as f:
-        yaml.safe_dump(config, f, default_flow_style=False)
 
 
 def prompt_non_empty(prompt_text: str) -> str:
@@ -111,17 +105,92 @@ def _check_garmin_connection() -> bool:
         return False
 
 
+def _migrate_legacy_config(config: dict) -> dict:
+    """Migrate legacy flat config to ProfileManager nested format."""
+    if "profile" in config:
+        return config
+
+    return {
+        "version": "1.0",
+        "created_at": config.get("setup_date", datetime.now().isoformat()),
+        "updated_at": datetime.now().isoformat(),
+        "profile": {
+            "name": config.get("name", ""),
+            "age": config.get("age", 30),
+            "sex": config.get("sex", "other"),
+            "height_cm": config.get("height_cm", 170.0),
+            "weight_kg": config.get("weight_kg", 70.0),
+            "sports": config.get("sports", ["running"]),
+            "goal_event": config.get("target_event", ""),
+            "goal_date": config.get("race_date", ""),
+            "fitness_level": config.get("fitness_level", "intermediate"),
+            "available_days": config.get("training_days_per_week", 4),
+        },
+        "fitness": {
+            "fetch_race_times": True,
+            "fetch_hr_baseline": True,
+        },
+        "garmin": {
+            "connected": config.get("garmin_connected", False),
+        },
+        "schedule": config.get(
+            "schedule",
+            {
+                "morning_checkin": {"enabled": True, "time": "06:00"},
+                "final_check": {"enabled": True, "time": "06:30"},
+                "evening_checkin": {"enabled": True, "time": "22:00"},
+                "weekly_review": {"enabled": True, "day": "sunday", "time": "21:00"},
+            },
+        ),
+        "ai_coach": config.get(
+            "ai",
+            {
+                "enabled": False,
+                "tone": "encouraging",
+                "flexibility": "moderate",
+            },
+        ),
+    }
+
+
+def load_config() -> dict:
+    """Load config, migrating legacy format if needed."""
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    if not os.path.exists(CONFIG_FILE):
+        return {}
+    try:
+        with open(CONFIG_FILE) as f:
+            config = yaml.safe_load(f) or {}
+        if "profile" not in config:
+            config = _migrate_legacy_config(config)
+            with open(CONFIG_FILE, "w") as f:
+                yaml.safe_dump(config, f, default_flow_style=False)
+        return config
+    except Exception:
+        return {}
+
+
+def save_config(config: dict):
+    """Save config in ProfileManager format."""
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(CONFIG_FILE, "w") as f:
+        yaml.safe_dump(config, f, default_flow_style=False, allow_unicode=True)
+    os.chmod(CONFIG_FILE, 0o600)
+
+
 def run_wizard():
     print("\n=== Garmin Personal Coach Setup ===\n")
 
-    config = load_config()
-    if config.get("setup_complete"):
+    pm = ProfileManager()
+    existing_profile = pm.load()
+
+    if existing_profile:
         print("Setup already completed. Updating configuration...\n")
 
     print("--- About You ---")
     name = prompt_non_empty("Your name: ")
     age = prompt_number("Age", 10, 100, default=30)
-    sex = prompt_choice("Sex", ["male", "female", "other"], default=0)
+    sex_str = prompt_choice("Sex", ["male", "female", "other"], default=0)
     height = prompt_number("Height (cm)", 100, 250, default=170)
     weight = prompt_number("Weight (kg)", 30, 200, default=70)
 
@@ -133,14 +202,14 @@ def run_wizard():
     while True:
         sel = input("Sports [default: 1]: ").strip()
         if not sel:
-            selected = ["running"]
+            selected = [Sport.RUNNING]
             break
         try:
             indices = [int(x) - 1 for x in sel.split()]
-            selected = [sports_options[i] for i in indices if 0 <= i < len(sports_options)]
+            selected = [Sport(sports_options[i]) for i in indices if 0 <= i < len(sports_options)]
             if selected:
                 break
-        except ValueError:
+        except (ValueError, IndexError):
             pass
         print("Please enter numbers like: 1 2 3")
 
@@ -154,18 +223,17 @@ def run_wizard():
         except ValueError:
             print("Invalid date format, skipping.")
 
-    fitness_level = prompt_choice(
+    fitness_level_str = prompt_choice(
         "Fitness level", ["beginner", "intermediate", "advanced"], default=1
     )
     available_days = prompt_number("Training days per week", 1, 7, default=4)
 
     print("\n--- Garmin Connection ---")
-    if _check_garmin_connection():
+    garmin_connected = _check_garmin_connection()
+    if garmin_connected:
         print("✅ Garmin account connected!")
-        garmin_connected = True
     else:
         print("⚠️  Garmin not connected. Run 'garth login your@email.com' after setup.")
-        garmin_connected = False
 
     print("\n--- Schedule ---")
     morning_time = input("Morning check-in time (HH:MM) [default: 06:00]: ").strip() or "06:00"
@@ -175,12 +243,11 @@ def run_wizard():
     enable_weekly = prompt_yes_no("Enable weekly review?", default=True)
 
     print("\n--- AI Coach (Optional) ---")
-    print("Enable AI-powered personalized coaching?")
     enable_ai = prompt_yes_no("Enable AI coach?", default=False)
 
     ai_api_key = None
-    ai_tone = "encouraging"
-    ai_flexibility = "moderate"
+    ai_tone = AITone.ENCOURAGING
+    ai_flexibility = AIFlexibility.MODERATE
 
     if enable_ai:
         print("\nTo use AI coaching, you need an API key:")
@@ -195,49 +262,51 @@ def run_wizard():
             print("API key saved securely.")
 
         print("\nAI coaching style:")
-        ai_tone = prompt_choice(
+        ai_tone_str = prompt_choice(
             "AI response tone", ["encouraging", "direct", "analytical"], default=0
         )
-        ai_flexibility = prompt_choice(
+        ai_tone = AITone(ai_tone_str)
+
+        ai_flexibility_str = prompt_choice(
             "AI flexibility", ["conservative", "moderate", "flexible"], default=1
         )
+        ai_flexibility = AIFlexibility(ai_flexibility_str)
     else:
         print(
             "\nSkipping AI setup. You can enable it later by setting OPENAI_API_KEY or ANTHROPIC_API_KEY."
         )
 
-    config.update(
-        {
-            "name": name,
-            "age": age,
-            "sex": sex,
-            "height_cm": height,
-            "weight_kg": weight,
-            "sports": selected,
-            "target_event": target_event or None,
-            "race_date": race_date,
-            "fitness_level": fitness_level,
-            "training_days_per_week": available_days,
-            "setup_complete": True,
-            "setup_date": datetime.now().isoformat(),
-            "garmin_connected": garmin_connected,
-            "schedule": {
-                "morning_time": morning_time,
-                "evening_time": evening_time,
-                "enable_morning": enable_morning,
-                "enable_evening": enable_evening,
-                "enable_weekly": enable_weekly,
-            },
-            "ai": {
-                "enabled": enable_ai,
-                "api_key": ai_api_key,
-                "tone": ai_tone,
-                "flexibility": ai_flexibility,
-            },
-        }
+    profile = UserProfile(
+        profile=ProfileData(
+            name=name,
+            age=age,
+            sex=Sex(sex_str),
+            height_cm=float(height),
+            weight_kg=float(weight),
+            sports=selected,
+            goal_event=target_event or "",
+            goal_date=race_date or "",
+            fitness_level=FitnessLevel(fitness_level_str),
+            available_days=available_days,
+        ),
+        fitness=FitnessData(),
+        garmin=GarminConfig(
+            connected=garmin_connected,
+        ),
+        schedule=ScheduleConfig(
+            morning_checkin={"enabled": enable_morning, "time": morning_time},
+            evening_checkin={"enabled": enable_evening, "time": evening_time},
+            weekly_review={"enabled": enable_weekly, "day": "sunday", "time": "21:00"},
+        ),
+        ai_coach=AICoachConfig(
+            enabled=enable_ai,
+            api_key=ai_api_key,
+            tone=ai_tone,
+            flexibility=ai_flexibility,
+        ),
     )
 
-    save_config(config)
+    pm.save(profile)
     print("\n--- Setup Complete! ---")
     print(f"Config saved to: {CONFIG_FILE}")
     print("\nNext steps:")
