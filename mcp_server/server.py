@@ -1,8 +1,13 @@
 import json
 import sys
+from pathlib import Path
 from typing import Any
 
 from garmin_coach._version import __version__
+
+# Extend import path to access garmin_coach package from repo root
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from garmin_coach.logging_config import log_info, log_error
 from garmin_coach.training_load_manager import get_training_load_manager
 from garmin_coach.rate_limit import MCP_LIMITER
 
@@ -74,6 +79,43 @@ def get_training_status() -> dict:
         return {"status": "error", "code": ERROR_TRAINING_LOAD, "message": str(e)}
 
 
+def check_garmin_connection() -> bool:
+    """Check if Garmin session is available."""
+    try:
+        from garmin_coach.activity_fetch import resume_garth
+
+        return resume_garth()
+    except Exception:
+        return False
+
+
+def check_training_load_manager() -> bool:
+    """Check if TrainingLoadManager is available."""
+    try:
+        from garmin_coach.training_load_manager import TrainingLoadManager
+
+        return True
+    except Exception:
+        return False
+
+
+def handle_health(params: dict) -> dict:
+    """Handle health check request."""
+    garmin_ok = check_garmin_connection()
+    tlm_ok = check_training_load_manager()
+
+    status = "healthy" if (garmin_ok and tlm_ok) else "degraded"
+
+    return {
+        "status": status,
+        "version": __version__,
+        "components": {
+            "garmin": "ok" if garmin_ok else "unavailable",
+            "training_load": "ok" if tlm_ok else "unavailable",
+        },
+    }
+
+
 def get_user_profile() -> dict:
     try:
         from garmin_coach.wizard import load_config
@@ -107,23 +149,21 @@ def get_recent_activities(days: int = 7) -> dict:
         from datetime import date, timedelta
 
         activities = []
-        for i in range(days):
-            d = date.today() - timedelta(days=i)
-            daily_load = calc.get_daily_load(d)
-            if daily_load:
-                activities.append(
-                    {
-                        "date": d.isoformat(),
-                        "trimp": daily_load.trimp,
-                        "sport": daily_load.sport.value,
-                        "duration_min": daily_load.duration_min,
-                        "description": daily_load.description,
-                    }
-                )
+        start_date = date.today() - timedelta(days=max(days - 1, 0))
+        for daily_load in calc.get_sessions_in_range(start_date, date.today()):
+            activities.append(
+                {
+                    "date": daily_load.date.isoformat(),
+                    "trimp": daily_load.trimp,
+                    "sport": daily_load.sport.value,
+                    "duration_min": daily_load.duration_min,
+                    "description": daily_load.description,
+                }
+            )
 
         return {
             "status": "success",
-            "data": activities,
+            "data": list(reversed(activities)),
         }
     except Exception as e:
         return {"status": "error", "code": ERROR_TRAINING_LOAD, "message": str(e)}
@@ -213,6 +253,14 @@ TOOLS = [
         },
     },
     {
+        "name": "health",
+        "description": "Get MCP server health and component status",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
         "name": "get_training_plan",
         "description": "Get recommended training plan based on current TSB",
         "inputSchema": {
@@ -228,6 +276,7 @@ TOOL_HANDLERS = {
     "get_user_profile": get_user_profile,
     "get_recent_activities": get_recent_activities,
     "handle_natural_language": handle_natural_language,
+    "health": lambda: handle_health({}),
     "get_training_plan": get_training_plan,
 }
 
@@ -310,6 +359,10 @@ def main():
                     request_id,
                     {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]},
                 )
+
+            elif method == "health":
+                res = handle_health(params)
+                send_response(request_id, res)
 
             elif method == "notifications/initialized":
                 pass
