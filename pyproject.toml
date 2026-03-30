@@ -24,9 +24,11 @@ classifiers = [
 ]
 requires-python = ">=3.10"
 dependencies = [
-    "garth>=0.4.0",
-    "pyyaml>=6.0",
     "caldav>=1.0.0",
+    "garth>=0.4.0",
+    "logfire",
+    "pyyaml>=6.0",
+    "tenacity",
 ]
 
 [project.optional-dependencies]
