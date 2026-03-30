@@ -7,6 +7,7 @@ from garmin_coach.handler.intent import Intent, detect_intent
 from garmin_coach.handler.templates import ResponseTemplate
 from garmin_coach.training_load_manager import get_training_load_manager
 from garmin_coach.rate_limit import HANDLER_LIMITER
+from garmin_coach.logging_config import log_warning
 
 
 class RateLimitError(Exception):
@@ -22,8 +23,8 @@ def _load_config() -> dict:
             with open(config_path) as f:
                 config = yaml.safe_load(f) or {}
                 return _normalize_config(config)
-    except Exception:
-        pass
+    except Exception as e:
+        log_warning(f"Failed to load config: {e}")
     return {}
 
 
@@ -63,7 +64,8 @@ def _get_real_context() -> dict:
             context["has_data"] = False
         else:
             context["has_data"] = True
-    except Exception:
+    except Exception as e:
+        log_warning(f"Failed to get training load context: {e}")
         context["ctl"] = 0
         context["atl"] = 0
         context["tsb"] = 0
@@ -92,7 +94,8 @@ class MessageHandler:
                     from garmin_coach.ai_simple import AICoach
 
                     self._ai_coach = AICoach(api_key=api_key)
-                except Exception:
+                except Exception as e:
+                    log_warning(f"Failed to initialize AI coach: {e}")
                     self._ai_coach = None
 
     def handle(self, message: str, client_key: str = "default") -> str:
@@ -120,8 +123,8 @@ class MessageHandler:
             response = self._ai_coach.generate_response(message, context)
             if response:
                 return response
-        except Exception:
-            pass
+        except Exception as e:
+            log_warning(f"AI response generation failed: {e}")
         return self._handle_with_rules(intent, message, context)
 
     def _handle_with_rules(self, intent: Intent, message: str, context: dict) -> str:

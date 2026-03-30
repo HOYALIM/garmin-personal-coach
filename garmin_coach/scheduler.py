@@ -3,10 +3,34 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 from datetime import datetime, time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from garmin_coach.activity_fetch import resume_garth
+from garmin_coach.logging_config import log_error, log_info, log_warning
+
+
+_shutdown_requested = False
+
+
+def _request_shutdown(signum, frame):
+    global _shutdown_requested
+    _shutdown_requested = True
+    log_warning(f"Shutdown signal received ({signum}), finishing current job...")
+
+
+def _register_signal_handlers():
+    signal.signal(signal.SIGTERM, _request_shutdown)
+    signal.signal(signal.SIGINT, _request_shutdown)
+
+
+def _is_shutdown_requested() -> bool:
+    return _shutdown_requested
+
 
 from garmin_coach.profile_manager import ProfileManager, ScheduleConfig
 
@@ -36,17 +60,27 @@ def should_run_now(job_time: time, margin_minutes: int = 5) -> bool:
 
 
 def run_job(name: str) -> int:
+    if _is_shutdown_requested():
+        log_warning(f"Scheduler: Skipping job {name} due to shutdown")
+        return -1
     script = SCRIPT_DIR / JOBS[name]
+    log_info(f"Scheduler: Running {name}", job=name, time=f"{datetime.now():%H:%M}")
     print(f"[scheduler] Running {name} at {datetime.now():%H:%M}")
     return subprocess.run([sys.executable, str(script)]).returncode
 
 
 def dispatch_scheduled() -> None:
+    _register_signal_handlers()
     pm = ProfileManager()
     profile = pm.load()
     if not profile:
+        log_error("Scheduler: No profile found")
         print("[scheduler] No profile. Run setup_wizard first.")
         sys.exit(1)
+
+    if not resume_garth():
+        log_warning("Scheduler: No Garmin session available at startup")
+        print("[scheduler] Warning: No Garmin session. Some jobs may be degraded.")
 
     schedule: ScheduleConfig = profile.schedule
     now = datetime.now()
@@ -56,6 +90,9 @@ def dispatch_scheduled() -> None:
         ("final_check", schedule.final_check),
         ("evening_checkin", schedule.evening_checkin),
     ]:
+        if _is_shutdown_requested():
+            log_info("Scheduler: Shutdown requested, stopping dispatch loop")
+            break
         if not job_config.get("enabled", False):
             continue
         job_time = parse_time(job_config.get("time", "00:00"))
@@ -67,9 +104,11 @@ def dispatch_scheduled() -> None:
         today_name = now.strftime("%A").lower()
         if today_name == wr.get("day", "sunday"):
             wr_time = parse_time(wr.get("time", "21:00"))
-            if should_run_now(wr_time):
+            if should_run_now(wr_time) and not _is_shutdown_requested():
+                log_info("Scheduler: Running weekly review")
                 run_job("weekly_review")
 
+    log_info("Scheduler: Dispatch complete")
     print("[scheduler] Done. No jobs due right now.")
 
 

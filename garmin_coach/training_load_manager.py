@@ -13,6 +13,7 @@ from garmin_coach.training_load import (
     Sport,
     FormCategory,
 )
+from garmin_coach.logging_config import log_warning
 
 
 DATA_DIR = os.path.expanduser("~/.config/garmin_coach")
@@ -45,7 +46,8 @@ class TrainingLoadManager:
         if os.path.exists(LOAD_FILE):
             try:
                 self._calc = TrainingLoadCalculator.from_json(Path(LOAD_FILE), sex=self._sex)
-            except Exception:
+            except Exception as e:
+                log_warning(f"Failed to load training load data, using default: {e}")
                 self._calc = TrainingLoadCalculator(sex=self._sex)
 
     def _load_sex(self) -> str:
@@ -56,8 +58,8 @@ class TrainingLoadManager:
                 with open(PROFILE_FILE) as f:
                     config = yaml.safe_load(f) or {}
                     return config.get("sex", "male")
-        except Exception:
-            pass
+        except Exception as e:
+            log_warning(f"Failed to load sex from config, using default: {e}")
         return "male"
 
     @property
@@ -100,7 +102,7 @@ class TrainingLoadManager:
         try:
             self._calc.export_json(Path(LOAD_FILE))
         except Exception as e:
-            print(f"Warning: Could not save training load: {e}")
+            log_warning("Could not save training load", exc=e)
 
     @classmethod
     def reset(cls):
