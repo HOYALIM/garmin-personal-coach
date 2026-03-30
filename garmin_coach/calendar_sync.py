@@ -6,6 +6,7 @@ from datetime import date
 from typing import Any
 
 from garmin_coach.models import WorkoutLog
+from garmin_coach.logging_config import log_warning
 
 
 CALDAV_URL = os.getenv("CALDAV_URL", "")
@@ -103,9 +104,7 @@ def find_and_update_workout_event(target_date: str, log: WorkoutLog) -> str | No
         return None
 
     try:
-        client = caldav.DAVClient(
-            CALDAV_URL, username=CALDAV_USER, password=CALDAV_PASS
-        )
+        client = caldav.DAVClient(CALDAV_URL, username=CALDAV_USER, password=CALDAV_PASS)
         principal = client.principal()
         calendars = list(principal.calendars())
 
@@ -133,7 +132,7 @@ def find_and_update_workout_event(target_date: str, log: WorkoutLog) -> str | No
                 ev.save()
                 return f"{ev.summary} ({target_date})"
 
-    except Exception:
-        pass
+    except Exception as e:
+        log_warning(f"Failed to find/update workout event: {e}")
 
     return None

@@ -12,6 +12,7 @@ except ImportError:
     requests = None
 
 from garmin_coach._version import __version__
+from garmin_coach.logging_config import log_warning
 
 
 GITHUB_API = "https://api.github.com/repos/HOYALIM/garmin-personal-coach/releases/latest"
@@ -37,8 +38,8 @@ def _read_cache() -> Optional[dict]:
                     import json
 
                     return json.load(f)
-    except Exception:
-        pass
+    except Exception as e:
+        log_warning(f"Failed to read update cache: {e}")
     return None
 
 
@@ -49,8 +50,8 @@ def _write_cache(data: dict):
             import json
 
             json.dump(data, f)
-    except Exception:
-        pass
+    except Exception as e:
+        log_warning(f"Failed to write update cache: {e}")
 
 
 def check_for_updates(force: bool = False) -> UpdateInfo:
@@ -92,8 +93,8 @@ def check_for_updates(force: bool = False) -> UpdateInfo:
                 is_update_available=_compare_versions(current, latest) < 0,
                 release_notes=data.get("body"),
             )
-    except Exception:
-        pass
+    except Exception as e:
+        log_warning(f"Failed to check for updates: {e}")
 
     return UpdateInfo(
         current=current,

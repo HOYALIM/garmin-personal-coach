@@ -9,6 +9,7 @@ from typing import Any
 
 from garmin_coach.activity_fetch import fetch_recent_activities, resume_garth
 from garmin_coach.calendar_sync import find_and_update_workout_event
+from garmin_coach.logging_config import log_warning
 from garmin_coach.models import ActivitySummary, WorkoutLog
 
 
@@ -29,7 +30,8 @@ def load_json(path: Path) -> dict[str, Any] | None:
         return None
     try:
         return json.loads(path.read_text())
-    except Exception:
+    except Exception as exc:
+        log_warning(f"Failed to load workout review JSON from {path}", exc=exc)
         return None
 
 
@@ -45,7 +47,8 @@ def find_today_activity(
             dt = datetime.fromisoformat(start)
             if dt >= cutoff:
                 return act
-        except Exception:
+        except Exception as exc:
+            log_warning(f"Failed to parse activity start time: {start}", exc=exc)
             if start >= cutoff.isoformat():
                 return act
     return None
@@ -96,9 +99,7 @@ def build_md(log: WorkoutLog) -> str:
     return "\n".join(lines) + "\n"
 
 
-def build_coach_note(
-    act: dict[str, Any], planned: str, distance_km: float | None
-) -> str:
+def build_coach_note(act: dict[str, Any], planned: str, distance_km: float | None) -> str:
     planned_lower = planned.lower()
     if distance_km is None:
         return "Activity recorded. Log distance/time manually if needed."
@@ -133,9 +134,7 @@ def write_log(
             avg_pace=activity.get("avg_pace"),
             avg_hr=activity.get("avg_hr"),
         )
-        log.coach_note = build_coach_note(
-            activity, log.planned or "", activity.get("distance_km")
-        )
+        log.coach_note = build_coach_note(activity, log.planned or "", activity.get("distance_km"))
     else:
         log.source = "unknown"
         log.coach_note = "No Garmin activity found. Enter distance/time manually."
@@ -193,9 +192,7 @@ def main() -> None:
         if cal_result:
             log.synced["calendar"] = True
             json_path = TRAINING_JSON_DIR / f"{args.date}.json"
-            json_path.write_text(
-                json.dumps(log.to_dict(), ensure_ascii=False, indent=2)
-            )
+            json_path.write_text(json.dumps(log.to_dict(), ensure_ascii=False, indent=2))
             print(f"Calendar updated: {cal_result}")
 
     print(f"Log: {TRAINING_MD_DIR / f'{args.date}.md'}")

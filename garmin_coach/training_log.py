@@ -6,6 +6,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from garmin_coach.logging_config import log_warning
 from garmin_coach.models import ActivitySummary, SubjectiveRating, WorkoutLog
 
 
@@ -27,7 +28,8 @@ def load_json(path: Path) -> dict[str, Any] | None:
         return None
     try:
         return json.loads(path.read_text())
-    except Exception:
+    except Exception as exc:
+        log_warning(f"Failed to load JSON from {path}", exc=exc)
         return None
 
 
@@ -80,9 +82,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--illness", action="store_true")
     p.add_argument("--notes", default="")
     p.add_argument("--tomorrow-note", default="")
-    p.add_argument(
-        "--source", default="manual", choices=["garmin", "manual", "strava", "unknown"]
-    )
+    p.add_argument("--source", default="manual", choices=["garmin", "manual", "strava", "unknown"])
     return p.parse_args()
 
 
