@@ -2,6 +2,8 @@ import json
 import os
 from typing import Optional
 
+from garmin_coach.logging_config import log_warning
+
 
 # Stable default models (tested and working)
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
@@ -126,7 +128,8 @@ Keep responses concise (2-3 sentences for quick questions, up to 1 paragraph for
                 temperature=0.7,
             )
             return response.choices[0].message.content
-        except Exception:
+        except Exception as e:
+            log_warning(f"OpenAI API call failed: {e}")
             return None
 
     def _call_anthropic(self, system: str, user: str) -> Optional[str]:
@@ -141,5 +144,6 @@ Keep responses concise (2-3 sentences for quick questions, up to 1 paragraph for
                 messages=[{"role": "user", "content": user}],
             )
             return response.content[0].text
-        except Exception:
+        except Exception as e:
+            log_warning(f"Anthropic API call failed: {e}")
             return None

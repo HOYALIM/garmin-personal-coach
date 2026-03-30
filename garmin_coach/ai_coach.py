@@ -71,9 +71,7 @@ class AICoachEngine:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
 
-    def ask(
-        self, ctx: CoachContext, question: str, mode: str = "advice"
-    ) -> CoachMessage:
+    def ask(self, ctx: CoachContext, question: str, mode: str = "advice") -> CoachMessage:
         if self._config.enabled and self.is_available:
             return self._omo_ask(ctx, question, mode)
         return self._rule_based_ask(ctx, question, mode)
@@ -87,32 +85,6 @@ class AICoachEngine:
         return self.ask(ctx, prompt, mode="weekly_review")
 
     def plan_adjustment_advice(self, ctx: CoachContext, reason: str) -> CoachMessage:
-        prompt = (
-            f"The user's data suggests a plan adjustment is needed.\n"
-            f"Reason: {reason}\n"
-            f"Current form: {ctx.load_snapshot.form.value if ctx.load_snapshot else 'unknown'}\n"
-            f"Should I adjust the training plan? Provide specific recommendations."
-        )
-        return self.ask(ctx, prompt, mode="plan_adjustment")
-
-    def _omo_ask(self, ctx: CoachContext, question: str, mode: str) -> CoachMessage:
-        """Ask AI coach a question with full context."""
-        if self._config.enabled and self.is_available:
-            return self._omo_ask(ctx, question, mode)
-        return self._rule_based_ask(ctx, question, mode)
-
-    def daily_evening_advice(self, ctx: CoachContext) -> CoachMessage:
-        """Generate personalized evening advice based on today's training + data."""
-        prompt = self._build_evening_prompt(ctx)
-        return self.ask(ctx, prompt, mode="evening_advice")
-
-    def weekly_review_advice(self, ctx: CoachContext) -> CoachMessage:
-        """Generate weekly review + next week preview."""
-        prompt = self._build_weekly_prompt(ctx)
-        return self.ask(ctx, prompt, mode="weekly_review")
-
-    def plan_adjustment_advice(self, ctx: CoachContext, reason: str) -> CoachMessage:
-        """Suggest plan adjustment based on user data."""
         prompt = (
             f"The user's data suggests a plan adjustment is needed.\n"
             f"Reason: {reason}\n"
@@ -168,9 +140,7 @@ Respond in the user's language (detect from context). Be specific and actionable
         self._conversation_history.append(msg)
         return msg
 
-    def _rule_based_ask(
-        self, ctx: CoachContext, question: str, mode: str
-    ) -> CoachMessage:
+    def _rule_based_ask(self, ctx: CoachContext, question: str, mode: str) -> CoachMessage:
         text = self._fallback_text(question, ctx)
         msg = CoachMessage(
             text=text,
@@ -195,9 +165,7 @@ Respond in the user's language (detect from context). Be specific and actionable
             "moderate": "You may adjust session intensity, swap similar sessions, and modify volume by up to 20%.",
             "flexible": "You may restructure entire weeks, change session types, and modify volume by up to 40%.",
         }
-        flex = flexibility_rules.get(
-            self._config.flexibility.value, flexibility_rules["moderate"]
-        )
+        flex = flexibility_rules.get(self._config.flexibility.value, flexibility_rules["moderate"])
 
         return f"""You are a knowledgeable, science-based endurance sports coach.
 
