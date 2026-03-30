@@ -10,6 +10,7 @@ from garmin_coach.adapters import (
     DailySummary,
     UserProfile,
 )
+from garmin_coach.logging_config import log_error
 
 
 STRAVA_CONFIG_DIR = os.path.expanduser("~/.config/garmin_coach")
@@ -24,7 +25,8 @@ def get_strava_token() -> Optional[dict]:
 
         with open(token_file) as f:
             return json.load(f)
-    except Exception:
+    except Exception as e:
+        log_error("Strava API error in get_strava_token", exc=e)
         return None
 
 
@@ -103,7 +105,8 @@ class StravaAdapter(DataSource):
                 sport_preferences=sports or ["running", "cycling"],
             )
             return self._profile_cache
-        except Exception:
+        except Exception as e:
+            log_error("Strava API error in get_profile", exc=e)
             return None
 
     def get_activities(
@@ -147,9 +150,7 @@ class StravaAdapter(DataSource):
                     if sport_type and act_type != sport_type.lower():
                         continue
 
-                    start_time = datetime.fromisoformat(
-                        act["start_date"].replace("Z", "+00:00")
-                    )
+                    start_time = datetime.fromisoformat(act["start_date"].replace("Z", "+00:00"))
 
                     if start_time.date() > end_date.date():
                         continue
@@ -183,7 +184,8 @@ class StravaAdapter(DataSource):
                 if len(data) < per_page:
                     break
                 page += 1
-            except Exception:
+            except Exception as e:
+                log_error("Strava API error in get_activities", exc=e)
                 break
 
         return activities
@@ -205,9 +207,7 @@ class StravaAdapter(DataSource):
         atl = len(activities) * 3.0
         tsb = ctl - atl
 
-        trimp = sum(
-            a.heart_rate_avg or 50 * a.duration_seconds / 60 for a in activities
-        )
+        trimp = sum(a.heart_rate_avg or 50 * a.duration_seconds / 60 for a in activities)
 
         return DailySummary(
             date=date,

@@ -8,6 +8,7 @@ from garmin_coach.adapters import (
     DailySummary,
     UserProfile,
 )
+from garmin_coach.logging_config import log_error
 
 
 NIKE_CONFIG_DIR = os.path.expanduser("~/.config/garmin_coach")
@@ -22,7 +23,8 @@ def get_nike_token() -> Optional[dict]:
 
         with open(token_file) as f:
             return json.load(f)
-    except Exception:
+    except Exception as e:
+        log_error("Nike API error in get_nike_token", exc=e)
         return None
 
 
