@@ -3,6 +3,8 @@ import os
 from datetime import datetime, timedelta
 from typing import Optional
 
+from garmin_coach.logging_config import log_warning
+
 
 DATA_DIR = os.path.expanduser("~/.config/garmin_coach")
 HYDRATION_FILE = os.path.join(DATA_DIR, "hydration.json")
@@ -18,7 +20,8 @@ def load_hydration_data() -> dict:
         try:
             with open(HYDRATION_FILE) as f:
                 return json.load(f)
-        except Exception:
+        except Exception as e:
+            log_warning(f"Failed to load hydration data: {e}")
             return {}
     return {}
 
