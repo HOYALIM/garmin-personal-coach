@@ -19,6 +19,7 @@ from garmin_coach.profile_manager import (
     AIFlexibility,
     AITone,
 )
+from garmin_coach.logging_config import log_warning
 
 
 CONFIG_DIR = os.path.expanduser("~/.config/garmin_coach")
@@ -101,7 +102,8 @@ def _check_garmin_connection() -> bool:
         garth.resume(os.path.expanduser(GARTH_HOME))
         garth.connectapi("/usersettings", max_retries=1)
         return True
-    except Exception:
+    except Exception as e:
+        log_warning(f"Garmin connection check failed: {e}")
         return False
 
 
@@ -166,7 +168,8 @@ def load_config() -> dict:
             with open(CONFIG_FILE, "w") as f:
                 yaml.safe_dump(config, f, default_flow_style=False)
         return config
-    except Exception:
+    except Exception as e:
+        log_warning(f"Failed to load config: {e}")
         return {}
 
 

@@ -7,6 +7,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Optional
 from urllib.parse import urlencode, urlparse, parse_qs
 
+from garmin_coach.logging_config import log_warning
+
 
 CONFIG_DIR = os.path.expanduser("~/.config/garmin_coach")
 
@@ -93,7 +95,8 @@ class OAuthFlow:
             if token.get("expires_at", 0) < time.time():
                 return False
             return True
-        except Exception:
+        except Exception as exc:
+            log_warning(f"Failed to read Strava token from {token_file}", exc=exc)
             return False
 
     @staticmethod
