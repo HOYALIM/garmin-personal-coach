@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 
 import garth
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from garmin_coach.adapters import (
     Activity,
@@ -10,6 +11,7 @@ from garmin_coach.adapters import (
     DailySummary,
     UserProfile,
 )
+from garmin_coach.logging_config import log_error
 
 
 GARTH_HOME = os.path.expanduser(os.getenv("GARTH_HOME", "~/.garth"))
@@ -39,7 +41,8 @@ class GarminAdapter(DataSource):
             garth.resume(GARTH_HOME)
             garth.connectapi("/usersettings", max_retries=1)
             return True
-        except Exception:
+        except Exception as e:
+            log_error("Garmin API error in is_authenticated", exc=e)
             return False
 
     def authenticate(self, credentials: dict) -> bool:
@@ -69,8 +72,7 @@ class GarminAdapter(DataSource):
             sports = []
             if user_info and "sports" in user_info:
                 sports = [
-                    s.get("sportType", {}).get("typeKey", "unknown")
-                    for s in user_info["sports"]
+                    s.get("sportType", {}).get("typeKey", "unknown") for s in user_info["sports"]
                 ]
 
             self._profile_cache = UserProfile(
@@ -84,9 +86,16 @@ class GarminAdapter(DataSource):
                 sport_preferences=sports,
             )
             return self._profile_cache
-        except Exception:
+        except Exception as e:
+            log_error("Garmin API error in get_profile", exc=e)
             return None
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type((Exception,)),
+        reraise=True,
+    )
     def get_activities(
         self,
         start_date: datetime,
@@ -95,7 +104,8 @@ class GarminAdapter(DataSource):
     ) -> List[Activity]:
         try:
             garth.resume(GARTH_HOME)
-        except Exception:
+        except Exception as e:
+            log_error("Garmin API error in get_activities", exc=e)
             return []
 
         if end_date is None:
@@ -143,8 +153,8 @@ class GarminAdapter(DataSource):
                                 raw_data={"garmin": True, "activity": str(act)[:200]},
                             )
                         )
-            except Exception:
-                pass
+            except Exception as e:
+                log_error(f"Garmin API error fetching activities for {current_date.date()}", exc=e)
             current_date += timedelta(days=1)
 
         return activities
@@ -173,12 +183,9 @@ class GarminAdapter(DataSource):
                 atl=float(atl),
                 tsb=float(tsb),
                 trimp=float(trimp),
-                activities=activities,
-                total_duration_minutes=total_duration // 60,
-                total_distance_km=round(total_distance, 2),
-                total_calories=total_calories,
             )
-        except Exception:
+        except Exception as e:
+            log_error("Garmin API error in get_daily_summary", exc=e)
             return None
 
     def get_time_series(

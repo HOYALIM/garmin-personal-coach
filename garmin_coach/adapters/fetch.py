@@ -5,6 +5,7 @@ from garmin_coach.adapters import DataSource, Activity, DailySummary, UserProfil
 from garmin_coach.adapters.garmin import GarminAdapter
 from garmin_coach.adapters.strava import StravaAdapter
 from garmin_coach.adapters.nike import NikeAdapter
+from garmin_coach.logging_config import log_error
 
 
 class UnifiedFetcher:
@@ -39,8 +40,8 @@ class UnifiedFetcher:
                 for act in acts:
                     act.raw_data["source"] = name
                 all_acts.extend(acts)
-            except Exception:
-                pass
+            except Exception as e:
+                log_error(f"Data fetch error in all_activities for source {name}", exc=e)
         all_acts.sort(key=lambda a: a.start_time, reverse=True)
         return all_acts
 
@@ -51,8 +52,8 @@ class UnifiedFetcher:
                 summary = source.get_daily_summary(date)
                 if summary:
                     summaries.append(summary)
-            except Exception:
-                pass
+            except Exception as e:
+                log_error(f"Data fetch error in merged_daily_summary for source {name}", exc=e)
 
         if not summaries:
             return None
@@ -92,8 +93,8 @@ class UnifiedFetcher:
                     profile = source.get_profile()
                     if profile:
                         return profile
-                except Exception:
-                    pass
+                except Exception as e:
+                    log_error(f"Data fetch error in combined_profile for source {name}", exc=e)
         return None
 
     def health_status(self) -> dict:
@@ -101,7 +102,8 @@ class UnifiedFetcher:
         for name, source in self._sources.items():
             try:
                 status[name] = source.is_authenticated()
-            except Exception:
+            except Exception as e:
+                log_error(f"Data fetch error in health_status for source {name}", exc=e)
                 status[name] = False
         return status
 
