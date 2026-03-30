@@ -5,58 +5,101 @@ from datetime import datetime
 from typing import Any
 
 import garth
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+from garmin_coach.logging_config import log_error, log_warning
 
 
 GARTH_HOME = os.path.expanduser(os.getenv("GARTH_HOME", "~/.garth"))
 
+GARTH_RETRYABLE_EXCEPTIONS = tuple(
+    exc
+    for exc in (getattr(garth, "GarthException", None), ConnectionError, TimeoutError)
+    if exc is not None
+) or (Exception,)
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type(GARTH_RETRYABLE_EXCEPTIONS),
+    reraise=True,
+)
+def _execute_garth_call(operation: str, fn):
+    try:
+        return fn()
+    except GARTH_RETRYABLE_EXCEPTIONS as exc:
+        log_warning(f"Retrying Garmin operation: {operation}", exc=exc)
+        raise
+
 
 def resume_garth() -> bool:
     try:
-        garth.resume(GARTH_HOME)
+        _execute_garth_call("resume session", lambda: garth.resume(GARTH_HOME))
         return True
-    except Exception:
+    except Exception as exc:
+        log_error("Failed to resume Garmin session", exc=exc)
         return False
 
 
 def safe_get_daily_summary(target_date: str) -> Any:
     try:
-        return garth.DailySummary.get(target_date)
-    except Exception:
+        return _execute_garth_call(
+            f"daily summary for {target_date}", lambda: garth.DailySummary.get(target_date)
+        )
+    except Exception as exc:
+        log_error(f"Failed to fetch daily summary for {target_date}", exc=exc)
         return None
 
 
 def safe_get_sleep(target_date: str) -> Any:
     try:
-        return garth.SleepData.get(target_date)
-    except Exception:
+        return _execute_garth_call(
+            f"sleep data for {target_date}", lambda: garth.SleepData.get(target_date)
+        )
+    except Exception as exc:
+        log_error(f"Failed to fetch sleep data for {target_date}", exc=exc)
         return None
 
 
 def safe_get_body_battery(target_date: str) -> Any:
     try:
-        return garth.BodyBatteryData.get(target_date)
-    except Exception:
+        return _execute_garth_call(
+            f"body battery for {target_date}", lambda: garth.BodyBatteryData.get(target_date)
+        )
+    except Exception as exc:
+        log_error(f"Failed to fetch body battery for {target_date}", exc=exc)
         return None
 
 
 def safe_get_training_readiness(target_date: str) -> Any:
     try:
-        return garth.MorningTrainingReadinessData.get(target_date)
-    except Exception:
+        return _execute_garth_call(
+            f"training readiness for {target_date}",
+            lambda: garth.MorningTrainingReadinessData.get(target_date),
+        )
+    except Exception as exc:
+        log_error(f"Failed to fetch training readiness for {target_date}", exc=exc)
         return None
 
 
 def safe_get_daily_hr(target_date: str) -> Any:
     try:
-        return garth.DailyHeartRate.get(target_date)
-    except Exception:
+        return _execute_garth_call(
+            f"daily heart rate for {target_date}", lambda: garth.DailyHeartRate.get(target_date)
+        )
+    except Exception as exc:
+        log_error(f"Failed to fetch HR for {target_date}", exc=exc)
         return None
 
 
 def safe_get_activities(limit: int = 10) -> list[Any]:
     try:
-        return garth.Activity.list(limit=limit)
-    except Exception:
+        return _execute_garth_call(
+            f"activities list limit={limit}", lambda: garth.Activity.list(limit=limit)
+        )
+    except Exception as exc:
+        log_error(f"Failed to fetch activities (limit={limit})", exc=exc)
         return []
 
 
@@ -97,22 +140,16 @@ def fetch_morning_metrics(target_date: str) -> dict[str, Any]:
         }
         sleep_hours = extract_sleep_hours(sleep_raw)
 
-    body_battery_value = (
-        getattr(summary, "body_battery_at_wake_time", None) if summary else None
-    )
-    if (
-        body_battery_value is None
-        and isinstance(body_battery_obj, list)
-        and body_battery_obj
-    ):
+    body_battery_value = getattr(summary, "body_battery_at_wake_time", None) if summary else None
+    if body_battery_value is None and isinstance(body_battery_obj, list) and body_battery_obj:
         try:
             body_battery_value = max(
                 event.event.body_battery_impact
                 for event in body_battery_obj
-                if getattr(getattr(event, "event", None), "body_battery_impact", None)
-                is not None
+                if getattr(getattr(event, "event", None), "body_battery_impact", None) is not None
             )
-        except Exception:
+        except Exception as exc:
+            log_warning("Failed to extract body battery from Garmin payload", exc=exc)
             body_battery_value = None
 
     readiness_value = getattr(readiness_obj, "score", None) if readiness_obj else None
@@ -137,9 +174,7 @@ def fetch_morning_metrics(target_date: str) -> dict[str, Any]:
         "raw": {
             "summary": summary,
             "sleep": sleep_raw,
-            "body_battery_obj": str(body_battery_obj)[:500]
-            if body_battery_obj
-            else None,
+            "body_battery_obj": str(body_battery_obj)[:500] if body_battery_obj else None,
             "readiness_obj": str(readiness_obj)[:500] if readiness_obj else None,
         },
     }
