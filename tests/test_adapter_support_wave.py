@@ -18,8 +18,13 @@ def test_adapter_support_wave(monkeypatch, tmp_path):
     fetcher = fetch.UnifiedFetcher()
     assert fetcher.primary_source() is None
     source = SimpleNamespace(is_authenticated=lambda: True)
+    # Phase 2: Strava is supplemental, not a primary-source fallback.
     fetcher.register("strava", source)
-    assert fetcher.primary_source() is source
+    assert fetcher.primary_source() is None
+    # Garmin registered → becomes primary.
+    garmin_src = SimpleNamespace(is_authenticated=lambda: True)
+    fetcher.register("garmin", garmin_src)
+    assert fetcher.primary_source() is garmin_src
     fetch._default_fetcher = None
     monkeypatch.setattr(
         fetch, "GarminAdapter", lambda: SimpleNamespace(is_authenticated=lambda: False)

@@ -154,7 +154,10 @@ def test_evening_checkin_paths(monkeypatch, tmp_path, capsys):
         load=lambda: fake_profile, calculate_all_zones=lambda profile: {"z2": [1, 2]}
     )
     fake_calc = SimpleNamespace(
-        get_snapshot=lambda target: SimpleNamespace(to_dict=lambda: {"tsb": 5})
+        get_snapshot=lambda target: SimpleNamespace(to_dict=lambda: {"tsb": 5}),
+        get_sessions_in_range=lambda start, end: [
+            SimpleNamespace(to_dict=lambda: {"sport": "running"})
+        ],
     )
     monkeypatch.setattr(evening, "get_week_number", lambda target_date: 5)
     monkeypatch.setattr(
@@ -163,11 +166,6 @@ def test_evening_checkin_paths(monkeypatch, tmp_path, capsys):
         lambda target_date: (5, "easy") if target_date == "2026-03-29" else (6, "rest"),
     )
     monkeypatch.setattr(evening, "get_week_brief", lambda week: "base build")
-    monkeypatch.setattr(
-        evening,
-        "fetch_recent_activities",
-        lambda start, end: [SimpleNamespace(to_dict=lambda: {"sport": "running"})],
-    )
     ctx = evening.build_evening_context("2026-03-29", {"energy": 3}, fake_pm, fake_calc)
     assert ctx.week_number == 5
     assert ctx.upcoming_session["session"] == (6, "rest")
@@ -179,9 +177,7 @@ def test_evening_checkin_paths(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(evening, "resume_garth", lambda: True)
     monkeypatch.setattr(evening, "ProfileManager", lambda: SimpleNamespace(exists=lambda: True))
     monkeypatch.setattr(
-        evening,
-        "TrainingLoadCalculator",
-        lambda sex="male": SimpleNamespace(export_json=lambda: "{}"),
+        evening, "get_training_load_manager", lambda: SimpleNamespace(calculator=SimpleNamespace())
     )
     monkeypatch.setattr(
         evening, "build_evening_context", lambda target_date, self_reported, pm, calc: "ctx"
@@ -198,7 +194,6 @@ def test_evening_checkin_paths(monkeypatch, tmp_path, capsys):
     evening.run_evening("2026-03-29", auto=False)
     out = capsys.readouterr().out
     assert "FMT night" in out
-    assert (data_dir / "training_load.json").exists()
 
     monkeypatch.setattr(evening, "ProfileManager", lambda: SimpleNamespace(exists=lambda: False))
     evening.run_evening("2026-03-29", auto=True)
@@ -284,15 +279,24 @@ def test_setup_wizard_helpers_and_run(monkeypatch, tmp_path, capsys):
             "7",
             "21:00",
             "y",
+            "1",
+            "",
+            "",
             "2",
             "1",
             "y",
             "1",
             "room-1",
+            "2",
+            "3",
+            "gluten,dairy",
+            "2",
+            "n",
         ]
     )
     monkeypatch.setattr(setup_wizard, "ask", lambda prompt, default="": next(answers))
     monkeypatch.setattr(setup_wizard, "test_garth_login", lambda email: True)
+    monkeypatch.setattr(setup_wizard, "setup_strava_oauth", lambda: True)
     saved = {}
     monkeypatch.setattr(
         setup_wizard,
@@ -308,6 +312,11 @@ def test_setup_wizard_helpers_and_run(monkeypatch, tmp_path, capsys):
     assert profile.profile.name == "Pat"
     assert profile.garmin.connected is True
     assert saved["profile"].ai_coach.notification_target == "room-1"
+    assert saved["profile"].ai_coach.api_key is None
+    assert saved["profile"].nutrition.weight_goal == "lose"
+    assert saved["profile"].nutrition.dietary_style == "vegan"
+    assert saved["profile"].nutrition.food_restrictions == ["gluten", "dairy"]
+    assert saved["profile"].nutrition.coaching_style == "detailed"
     assert "Profile saved" in capsys.readouterr().out
 
 
@@ -384,6 +393,7 @@ def test_wizard_validation_and_config(monkeypatch, tmp_path, capsys):
         lambda: SimpleNamespace(load=lambda: None, save=lambda profile: saved.append(profile)),
     )
     monkeypatch.setattr(wizard, "_check_garmin_connection", lambda: True)
+    monkeypatch.setattr(wizard, "setup_strava_oauth", lambda: True)
     inputs = iter(
         [
             "Pat",
@@ -402,15 +412,24 @@ def test_wizard_validation_and_config(monkeypatch, tmp_path, capsys):
             "n",
             "y",
             "y",
+            "1",
             "token",
+            "",
             "2",
             "3",
+            # nutrition preferences
+            "",  # weight goal (default: maintain)
+            "",  # dietary style (default: omnivore)
+            "",  # food restrictions (empty)
+            "",  # nutrition coaching style (default: brief)
+            "n",
         ]
     )
     monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
     saved = []
     wizard.run_wizard()
     assert saved[0].profile.name == "Pat"
+    assert saved[0].ai_coach.api_key == "token"
     assert "Setup Complete" in capsys.readouterr().out
 
     assert validation.validate_age(9)[0] is False

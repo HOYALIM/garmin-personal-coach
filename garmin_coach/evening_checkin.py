@@ -7,17 +7,14 @@ import json
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from garmin_coach.activity_fetch import (
-    fetch_morning_metrics,
-    fetch_recent_activities,
-    resume_garth,
-)
+from garmin_coach.activity_fetch import fetch_morning_metrics, resume_garth
 from garmin_coach.ai_coach import AICoachEngine, CoachContext
 from garmin_coach.coach_engine import evaluate
 from garmin_coach.models import MorningMetrics, Phase
 from garmin_coach.plan import get_planned_session, get_week_brief, get_week_number
 from garmin_coach.profile_manager import ProfileManager
 from garmin_coach.training_load import Sport, TrainingLoadCalculator
+from garmin_coach.training_load_manager import get_training_load_manager
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -26,14 +23,16 @@ DATA_DIR.mkdir(exist_ok=True)
 EVENING_DATA = DATA_DIR / "evening_data"
 
 
+def _activity_payload(activity) -> dict:
+    return activity.to_dict() if hasattr(activity, "to_dict") else activity
+
+
 def ask_self_report() -> dict:
     print("\n📋 Evening Check-In")
     print("Answer a few quick questions:\n")
 
     def q(label: str, default: str = "") -> str:
-        return (
-            input(f"  {label}{f' [{default}]' if default else ''}: ").strip() or default
-        )
+        return input(f"  {label}{f' [{default}]' if default else ''}: ").strip() or default
 
     def scale(label: str, default: int) -> int:
         while True:
@@ -73,7 +72,7 @@ def build_evening_context(
     brief = get_week_brief(week)
 
     today = date.fromisoformat(target_date)
-    activities = fetch_recent_activities(today, today)
+    activities = calculator.get_sessions_in_range(today, today)
     last = activities[0] if activities else None
 
     snapshot = calculator.get_snapshot(today)
@@ -88,13 +87,11 @@ def build_evening_context(
         user_profile=profile,
         load_snapshot=snapshot,
         zones=zones,
-        recent_activities=[
-            a.to_dict() if hasattr(a, "to_dict") else a for a in activities
-        ],
+        recent_activities=[_activity_payload(a) for a in activities],
         self_reported=self_reported,
         week_number=week,
         phase=brief[:20] if brief else "base",
-        last_session=last.to_dict() if last and hasattr(last, "to_dict") else None,
+        last_session=_activity_payload(last) if last else None,
         upcoming_session={
             "date": upcoming_date,
             "week": upcoming_week,
@@ -135,10 +132,7 @@ def run_evening(target_date: str | None = None, auto: bool = False) -> None:
         self_reported = ask_self_report()
     save_evening_data(target_date, self_reported)
 
-    calc = TrainingLoadCalculator(sex="male")
-    calc_file = DATA_DIR / "training_load.json"
-    if calc_file.exists():
-        calc = TrainingLoadCalculator.from_json(calc_file)
+    calc = get_training_load_manager().calculator
 
     ctx = build_evening_context(target_date, self_reported, pm, calc)
     engine = AICoachEngine()
@@ -146,16 +140,13 @@ def run_evening(target_date: str | None = None, auto: bool = False) -> None:
 
     print("\n" + engine.format_message(msg))
 
-    calc_file.write_text(calc.export_json())
     print(f"\n✓ Evening check-in saved to {EVENING_DATA}/{target_date}.json")
 
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Evening check-in")
     p.add_argument("--date", default=date.today().isoformat())
-    p.add_argument(
-        "--auto", action="store_true", help="Skip questions, use rule-based advice"
-    )
+    p.add_argument("--auto", action="store_true", help="Skip questions, use rule-based advice")
     run_evening(p.parse_args().date, auto=p.parse_args().auto)
 
 

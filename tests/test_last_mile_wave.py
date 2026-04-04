@@ -190,8 +190,9 @@ def test_last_mile_wave(monkeypatch, tmp_path):
         return orig_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
-    log_mod = runpy.run_path("/tmp/garmin-personal-coach/garmin_coach/logging_config.py")
-    upd_mod = runpy.run_path("/tmp/garmin-personal-coach/garmin_coach/update_check.py")
+    repo_root = Path(__file__).resolve().parents[1]
+    log_mod = runpy.run_path(str(repo_root / "garmin_coach" / "logging_config.py"))
+    upd_mod = runpy.run_path(str(repo_root / "garmin_coach" / "update_check.py"))
     assert log_mod["_logfire_module"] is None
     assert upd_mod["requests"] is None
     monkeypatch.setattr(builtins, "__import__", orig_import)

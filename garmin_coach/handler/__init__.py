@@ -1,7 +1,7 @@
 """Natural language message handler with real data and AI."""
 
 import os
-from typing import Optional
+from typing import Any, Optional
 
 from garmin_coach.handler.intent import Intent, detect_intent
 from garmin_coach.handler.templates import ResponseTemplate
@@ -39,10 +39,13 @@ def _normalize_config(config: dict) -> dict:
             "ai": {
                 "enabled": config.get("ai_coach", {}).get("enabled", False),
                 "api_key": config.get("ai_coach", {}).get("api_key"),
+                "provider": config.get("ai_coach", {}).get("provider", "auto"),
+                "model": config.get("ai_coach", {}).get("model"),
                 "tone": config.get("ai_coach", {}).get("tone", "encouraging"),
                 "flexibility": config.get("ai_coach", {}).get("flexibility", "moderate"),
             },
             "profile": config.get("profile", {}),
+            "nutrition": config.get("nutrition", {}),
         }
     return config
 
@@ -54,6 +57,7 @@ def _get_real_context() -> dict:
     context["name"] = config.get("name", "Athlete")
     context["setup_complete"] = config.get("setup_complete", False)
     context["garmin_connected"] = config.get("garmin_connected", False)
+    context["nutrition"] = config.get("nutrition", {})
 
     try:
         manager = get_training_load_manager()
@@ -75,25 +79,41 @@ def _get_real_context() -> dict:
 
 
 class MessageHandler:
-    def __init__(self, config: dict = None, user_context: dict = None):
+    def __init__(self, config: Optional[dict] = None, user_context: Optional[dict] = None):
         self.config = config or _load_config()
         self.user_context = user_context or {}
         self.tone = self.config.get("ai", {}).get("tone", "encouraging")
         self.template = ResponseTemplate(self.tone)
-        self._ai_coach = None
+        self._ai_coach: Optional[Any] = None
 
     def _init_ai_coach(self):
         if self._ai_coach is None:
-            api_key = (
-                self.config.get("ai", {}).get("api_key")
-                or os.getenv("OPENAI_API_KEY")
+            ai_config = self.config.get("ai", {})
+            if "enabled" in ai_config and not ai_config.get("enabled"):
+                return
+            explicit_api_key = ai_config.get("api_key")
+            provider = ai_config.get("provider")
+            model = ai_config.get("model")
+            env_api_key = (
+                os.getenv("OPENAI_API_KEY")
                 or os.getenv("ANTHROPIC_API_KEY")
+                or os.getenv("GOOGLE_API_KEY")
+                or os.getenv("GEMINI_API_KEY")
             )
-            if api_key:
+            if explicit_api_key or provider or model or env_api_key:
                 try:
                     from garmin_coach.ai_simple import AICoach
 
-                    self._ai_coach = AICoach(api_key=api_key)
+                    coach_kwargs = {}
+                    if explicit_api_key:
+                        coach_kwargs["api_key"] = explicit_api_key
+                    elif not provider and not model and env_api_key:
+                        coach_kwargs["api_key"] = env_api_key
+                    if provider:
+                        coach_kwargs["provider"] = provider
+                    if model:
+                        coach_kwargs["model"] = model
+                    self._ai_coach = AICoach(**coach_kwargs)
                 except Exception as e:
                     log_warning(f"Failed to initialize AI coach: {e}")
                     self._ai_coach = None
@@ -113,13 +133,15 @@ class MessageHandler:
 
         self._init_ai_coach()
 
-        if self._ai_coach:
+        if self._ai_coach is not None:
             return self._handle_with_ai(message, intent, context)
 
         return self._handle_with_rules(intent, message, context)
 
     def _handle_with_ai(self, message: str, intent: Intent, context: dict) -> str:
         try:
+            if self._ai_coach is None:
+                return self._handle_with_rules(intent, message, context)
             response = self._ai_coach.generate_response(message, context)
             if response:
                 return response
@@ -162,6 +184,26 @@ class MessageHandler:
 
     def _handle_workout_complete(self, context: dict) -> str:
         tsb = context.get("tsb", 0)
+        sync_note = ""
+        changed = False
+
+        try:
+            from garmin_coach.integrations.garmin import sync_garmin_training_load
+
+            sync_result = sync_garmin_training_load(days=1, dry_run=False)
+            changed_count = sync_result.get("added", 0) + sync_result.get("updated", 0)
+            changed = changed_count > 0
+            if changed_count:
+                sync_note = f" Synced {changed_count} Garmin day(s) into training load."
+        except Exception as e:
+            log_warning(f"Garmin workout completion sync failed: {e}")
+
+        if changed:
+            try:
+                context = _get_real_context()
+                tsb = context.get("tsb", tsb)
+            except Exception as e:
+                log_warning(f"Failed to refresh context after workout sync: {e}")
 
         msg = "Great work today!"
 
@@ -172,7 +214,7 @@ class MessageHandler:
         else:
             msg += " Keep building!"
 
-        return msg
+        return msg + sync_note
 
     def _handle_ask_status(self, context: dict) -> str:
         ctl = context.get("ctl", 0)
@@ -217,13 +259,68 @@ class MessageHandler:
 
     def _handle_ask_nutrition(self, context: dict) -> str:
         ctl = context.get("ctl", 0)
+        nutrition = context.get("nutrition", {})
+        weight_goal = nutrition.get("weight_goal", "maintain")
+        dietary_style = nutrition.get("dietary_style", "omnivore")
+        restrictions = nutrition.get("food_restrictions", [])
+        coaching_style = nutrition.get("coaching_style", "brief")
 
+        # Training-load tier
         if ctl > 50:
-            return "High training load. Focus on protein (1.6-2g/kg) and carbs for recovery."
+            load_msg = "High training load — prioritise carbs for fuel and protein for recovery."
+            protein_note = "Aim for 1.8-2.2 g protein/kg."
         elif ctl > 30:
-            return "Moderate training. Balanced nutrition with carbs before workouts."
+            load_msg = (
+                "Moderate training load — balanced nutrition with carbs timed around sessions."
+            )
+            protein_note = "Aim for 1.6-1.8 g protein/kg."
         else:
-            return "Building base fitness. Focus on adequate protein and overall calories."
+            load_msg = "Building base fitness — adequate protein and overall calories matter most."
+            protein_note = "Aim for 1.4-1.6 g protein/kg."
+
+        # Weight-goal adjustment
+        goal_note = {
+            "lose": "Keep a modest calorie deficit (~200-300 kcal) to preserve muscle during training.",
+            "gain": "Eat in a slight surplus (~200-300 kcal) to support adaptation and muscle growth.",
+            "maintain": "Match calories to training output to maintain body composition.",
+        }.get(weight_goal, "")
+
+        # Dietary-style note
+        style_note = ""
+        if dietary_style in ("vegetarian", "vegan"):
+            style_note = (
+                "As a plant-based athlete, combine varied protein sources (legumes, tofu, tempeh, "
+                "seeds) to cover all essential amino acids."
+            )
+
+        # Restriction note
+        restriction_note = ""
+        if restrictions:
+            restriction_note = f"Avoid: {', '.join(restrictions)}."
+
+        if coaching_style == "macros":
+            lines = [load_msg, protein_note, goal_note]
+            if style_note:
+                lines.append(style_note)
+            if restriction_note:
+                lines.append(restriction_note)
+            return " ".join(l for l in lines if l)
+        elif coaching_style == "detailed":
+            parts = [load_msg, protein_note, goal_note]
+            if style_note:
+                parts.append(style_note)
+            if restriction_note:
+                parts.append(restriction_note)
+            parts.append("Stay well hydrated and eat whole foods where possible.")
+            return "\n".join(p for p in parts if p)
+        else:
+            # brief
+            parts = [load_msg, goal_note]
+            if style_note:
+                parts.append(style_note)
+            if restriction_note:
+                parts.append(restriction_note)
+            return " ".join(p for p in parts if p)
 
     def _handle_symptom_report(self, message: str, context: dict) -> str:
         msg_lower = message.lower()
@@ -251,6 +348,6 @@ class MessageHandler:
             return "High fatigue detected. Rest recommended! 🛑"
 
 
-def process_message(message: str, user_context: dict = None) -> str:
+def process_message(message: str, user_context: Optional[dict] = None) -> str:
     handler = MessageHandler(user_context=user_context)
     return handler.handle(message)

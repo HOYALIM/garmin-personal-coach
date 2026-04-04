@@ -20,13 +20,17 @@ _For early-user / beta release. Honest assessment of what must be true, what is 
 ## Known Limitations — Must Communicate to Early Users
 
 ### Strava
-- OAuth is not a guided flow. Users must manually create and place a token file.
-- CTL/ATL from Strava is placeholder math. Training load metrics should be treated as approximate.
-- Strava is supplemental only — not a standalone data source.
+- OAuth is guided through `garmin-coach connect-strava`, but users still need their own Strava API app credentials.
+- Strava sync is manual in this release (`garmin-coach strava-sync`).
+- Strava is supplemental only — not a standalone authoritative source.
 
 ### AI Coaching
-- Requires a paid OpenAI or Anthropic API key.
+- Requires a paid OpenAI, Anthropic, or Gemini API key for AI-enhanced responses.
 - Without a key, coaching is rule-based only (TSB thresholds, no personalized language).
+
+### Nutrition Coaching
+- Current nutrition coaching is lightweight preference-based guidance only.
+- No meal logging, image upload, or calorie-from-photo estimation in this release.
 
 ### No Web Dashboard
 - There is no UI. All interaction is CLI, Telegram, or MCP.
@@ -46,13 +50,7 @@ _For early-user / beta release. Honest assessment of what must be true, what is 
 
 ## README Accuracy Issues (Do Not Ship Until Fixed)
 
-These items in the current README are inaccurate and should be corrected before a public release:
-
-| README claim | Reality | Action needed |
-|--------------|---------|---------------|
-| "Coming Soon: Strava integration" | Strava adapter exists, partial implementation | Change to "Strava (beta, manual token setup required)" |
-| "Coming Soon: Nike Run Club integration" | No public API — deferred indefinitely | Remove or move to "Not planned" |
-| Architecture note: "Garmin → Strava/Nike coming" | Nike is deferred | Remove Nike from coming-soon list |
+**None blocking after the current doc updates.**
 
 ---
 
@@ -62,11 +60,10 @@ These are known gaps that do not block an early-user release but should be on th
 
 | Item | Priority | Notes |
 |------|----------|-------|
-| Strava guided OAuth wizard | High | Removes manual token setup friction |
-| Real PMC math for Strava CTL/ATL | Medium | Current placeholder is not accurate |
+| Automatic Strava sync trigger | Medium | Sync is still manual by design in this release |
 | Web dashboard | Medium | Specs exist; not implemented |
 | Apple HealthKit (iOS native track) | Low | Separate project, not this repo |
-| iMessage | Not planned | No spec or implementation |
+| iMessage | Planned later | No implementation yet |
 
 ---
 
@@ -78,11 +75,12 @@ These are known gaps that do not block an early-user release but should be on th
 > - Garmin Connect integration (core)
 > - Training load metrics (CTL/ATL/TSB) from Garmin data
 > - AI coaching via CLI, Telegram, and MCP
-> - Optional Strava sync (manual token setup required)
+> - Lightweight personalized nutrition guidance
+> - Optional Strava sync via guided OAuth + manual sync command
 >
 > Known limitations:
 > - No web dashboard
 > - No mobile app (use Telegram for mobile)
-> - Strava OAuth requires manual token — guided flow coming
+> - Strava sync is manual and Garmin remains the primary source of truth
 > - No Nike Run Club or Apple HealthKit support
-> - AI coaching requires OpenAI or Anthropic API key
+> - AI coaching requires OpenAI, Anthropic, or Gemini API key for enhanced responses

@@ -10,10 +10,15 @@ from pathlib import Path
 from garmin_coach.profile_manager import (
     AICoachConfig,
     AIFlexibility,
+    AIProvider,
     AITone,
+    DietaryStyle,
+    FitnessLevel,
     FitnessData,
     GarminConfig,
     GarMiniAuthMethod,
+    NutritionCoachingStyle,
+    NutritionPreferences,
     NotificationMethod,
     ProfileData,
     ProfileManager,
@@ -21,6 +26,7 @@ from garmin_coach.profile_manager import (
     Sport,
     UserProfile,
 )
+from garmin_coach.wizard.oauth import setup_strava_oauth
 
 
 def ask(prompt: str, default: str = "") -> str:
@@ -152,7 +158,7 @@ def run() -> UserProfile:
         primary_sport=Sport(primary),
         goal_event=goal_event,
         goal_date=goal_date,
-        fitness_level=level_raw,
+        fitness_level=FitnessLevel(level_raw),
         available_days=available_days,
         max_weekly_hours=max_hours,
     )
@@ -174,15 +180,9 @@ def run() -> UserProfile:
         cycling_ftp_w=ask_int("FTP in Watts (cycling, 0 if N/A)", 0, 0, 500),
         swim_100m_pace=ask("100m swim pace (e.g. 1:50)", "unknown"),
         fetch_race_times=ask_bool("Fetch race times from Garmin automatically?", True),
-        fetch_hr_baseline=ask_bool(
-            "Fetch HR baseline from Garmin automatically?", True
-        ),
-        fetch_cycling_data=ask_bool(
-            "Fetch cycling data from Garmin?", "cycling" in sports_raw
-        ),
-        fetch_swimming_data=ask_bool(
-            "Fetch swimming data from Garmin?", "swimming" in sports_raw
-        ),
+        fetch_hr_baseline=ask_bool("Fetch HR baseline from Garmin automatically?", True),
+        fetch_cycling_data=ask_bool("Fetch cycling data from Garmin?", "cycling" in sports_raw),
+        fetch_swimming_data=ask_bool("Fetch swimming data from Garmin?", "swimming" in sports_raw),
     )
 
     print("\n─── 5. Garmin Connection ──────────────────────────────")
@@ -203,9 +203,7 @@ def run() -> UserProfile:
     print("\n─── 6. Schedule ──────────────────────────────────────")
     print("Configure when each coaching module runs.")
 
-    def schedule_job(
-        name: str, default_time: str, default_enabled: bool = True
-    ) -> dict:
+    def schedule_job(name: str, default_time: str, default_enabled: bool = True) -> dict:
         enabled = ask_bool(f"Enable {name}?", default_enabled)
         time_str = ask("Time (HH:MM)", default_time) if enabled else "00:00"
         return {"enabled": enabled, "time": time_str}
@@ -234,28 +232,95 @@ def run() -> UserProfile:
     )
 
     print("\n─── 7. AI Coach ──────────────────────────────────────")
+    ai_provider = AIProvider.AUTO
+    ai_model = None
     ai_data = AICoachConfig(
         enabled=ask_bool("Enable AI coach (advice, plan modification)?", True),
-        flexibility=ask_choice(
-            "AI flexibility",
-            ["conservative", "moderate", "flexible"],
-            default_idx=1,
-        ),
-        tone=ask_choice(
-            "AI coaching tone",
-            ["encouraging", "direct", "analytical", "motivational"],
-            default_idx=0,
-        ),
-        can_modify_plan=ask_bool("Allow AI to modify your training plan?", True),
-        notification_method=ask_choice(
-            "Notification method",
-            ["print", "notify-send", "telegram", "discord"],
-            default_idx=0,
-        ),
-        notification_target=ask(
+        flexibility=AIFlexibility.MODERATE,
+        tone=AITone.ENCOURAGING,
+        can_modify_plan=True,
+        notification_method=NotificationMethod.PRINT,
+        notification_target="",
+    )
+
+    if ai_data.enabled:
+        ai_provider = AIProvider(
+            ask_choice(
+                "AI provider",
+                ["auto", "openai", "anthropic", "gemini"],
+                default_idx=0,
+            )
+        )
+        ai_model = (
+            ask(
+                "AI model (leave blank for provider default)",
+                "",
+            ).strip()
+            or None
+        )
+        api_key_input = ask(
+            "AI API key (leave blank to use provider environment variable)",
+            "",
+        ).strip()
+        ai_data.api_key = api_key_input or None
+        ai_data.flexibility = AIFlexibility(
+            ask_choice(
+                "AI flexibility",
+                ["conservative", "moderate", "flexible"],
+                default_idx=1,
+            )
+        )
+        ai_data.tone = AITone(
+            ask_choice(
+                "AI coaching tone",
+                ["encouraging", "direct", "analytical", "motivational"],
+                default_idx=0,
+            )
+        )
+        ai_data.can_modify_plan = ask_bool("Allow AI to modify your training plan?", True)
+        ai_data.notification_method = NotificationMethod(
+            ask_choice(
+                "Notification method",
+                ["print", "notify-send", "telegram", "discord"],
+                default_idx=0,
+            )
+        )
+        ai_data.notification_target = ask(
             "Notification target (channel/chat ID, skip for print)", ""
+        )
+
+    ai_data.provider = ai_provider
+    ai_data.model = ai_model
+
+    print("\n─── 8. Nutrition Preferences (Optional) ─────────────────")
+    nutrition_data = NutritionPreferences(
+        weight_goal=ask_choice(
+            "Weight / body-composition goal",
+            ["maintain", "lose", "gain"],
+            default_idx=0,
+        ),
+        dietary_style=ask_choice(
+            "Dietary style",
+            ["omnivore", "vegetarian", "vegan", "other"],
+            default_idx=0,
+        ),
+        food_restrictions=[
+            r.strip()
+            for r in ask(
+                "Food restrictions / avoidances (comma-separated, optional)",
+                "",
+            ).split(",")
+            if r.strip()
+        ],
+        coaching_style=ask_choice(
+            "Nutrition advice style",
+            ["brief", "detailed", "macros"],
+            default_idx=0,
         ),
     )
+
+    if ask_bool("Connect Strava now?", False):
+        setup_strava_oauth()
 
     user_profile = UserProfile(
         profile=profile_data,
@@ -263,6 +328,7 @@ def run() -> UserProfile:
         garmin=garmin_data,
         schedule=schedule_data,
         ai_coach=ai_data,
+        nutrition=nutrition_data,
     )
 
     print("\n─── Validation ────────────────────────────────────────")
@@ -278,8 +344,9 @@ def run() -> UserProfile:
 
     pm.save(user_profile)
     print(f"\n✓ Profile saved to {pm.config_path}")
-    print("\nRun 'garmin_coach dispatch' to start the daily loop.")
-    print("Run 'garmin_coach setup-wizard' to reconfigure.")
+    print("\nRun 'garmin-coach status' to check your training status.")
+    print("Run 'garmin-coach setup' to reconfigure.")
+    print("Run 'garmin-coach-telegram' for mobile notifications.")
 
     return user_profile
 

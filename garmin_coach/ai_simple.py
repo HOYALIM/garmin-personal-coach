@@ -1,3 +1,4 @@
+import importlib
 import json
 import os
 from typing import Optional
@@ -8,6 +9,7 @@ from garmin_coach.logging_config import log_warning
 # Stable default models (tested and working)
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-20250514"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
 # Model aliases for user convenience
 MODEL_ALIASES = {
@@ -17,6 +19,8 @@ MODEL_ALIASES = {
     "claude-sonnet": "claude-sonnet-4-20250514",
     "claude-opus": "claude-opus-3-5-20250514",
     "claude-haiku": "claude-haiku-3-5-20250514",
+    "gemini-flash": "gemini-2.5-flash",
+    "gemini-pro": "gemini-2.5-pro",
 }
 
 
@@ -27,11 +31,10 @@ class AICoach:
         model: Optional[str] = None,
         provider: Optional[str] = None,
     ):
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
-
         # Detect provider first (respects explicit provider if given)
         self._explicit_provider = provider
         self.provider = self._detect_provider()
+        self.api_key = self._resolve_api_key(api_key)
 
         # Resolve model: explicit > env > default
         self.model = self._resolve_model(model)
@@ -40,7 +43,7 @@ class AICoach:
         self._model_resolved = self.model
 
     def _detect_provider(self) -> str:
-        if self._explicit_provider:
+        if self._explicit_provider and self._explicit_provider != "auto":
             return self._explicit_provider
 
         # Check env vars
@@ -48,7 +51,27 @@ class AICoach:
             return "anthropic"
         if os.getenv("OPENAI_API_KEY"):
             return "openai"
+        if os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"):
+            return "gemini"
         return "none"
+
+    def _resolve_api_key(self, explicit_key: Optional[str]) -> Optional[str]:
+        if explicit_key:
+            return explicit_key
+
+        if self.provider == "anthropic":
+            return os.getenv("ANTHROPIC_API_KEY")
+        if self.provider == "openai":
+            return os.getenv("OPENAI_API_KEY")
+        if self.provider == "gemini":
+            return os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+
+        return (
+            os.getenv("ANTHROPIC_API_KEY")
+            or os.getenv("OPENAI_API_KEY")
+            or os.getenv("GOOGLE_API_KEY")
+            or os.getenv("GEMINI_API_KEY")
+        )
 
     def _resolve_model(self, user_model: Optional[str]) -> str:
         if user_model:
@@ -60,6 +83,8 @@ class AICoach:
             return DEFAULT_OPENAI_MODEL
         if self.provider == "anthropic":
             return DEFAULT_ANTHROPIC_MODEL
+        if self.provider == "gemini":
+            return DEFAULT_GEMINI_MODEL
         return ""
 
     def generate_response(self, message: str, context: dict) -> Optional[str]:
@@ -73,6 +98,8 @@ class AICoach:
             return self._call_openai(system_prompt, user_prompt)
         elif self.provider == "anthropic":
             return self._call_anthropic(system_prompt, user_prompt)
+        elif self.provider == "gemini":
+            return self._call_gemini(system_prompt, user_prompt)
 
         return None
 
@@ -115,7 +142,7 @@ Keep responses concise (2-3 sentences for quick questions, up to 1 paragraph for
 
     def _call_openai(self, system: str, user: str) -> Optional[str]:
         try:
-            import openai
+            openai = importlib.import_module("openai")
 
             client = openai.OpenAI(api_key=self.api_key)
             response = client.chat.completions.create(
@@ -134,7 +161,7 @@ Keep responses concise (2-3 sentences for quick questions, up to 1 paragraph for
 
     def _call_anthropic(self, system: str, user: str) -> Optional[str]:
         try:
-            import anthropic
+            anthropic = importlib.import_module("anthropic")
 
             client = anthropic.Anthropic(api_key=self.api_key)
             response = client.messages.create(
@@ -146,4 +173,19 @@ Keep responses concise (2-3 sentences for quick questions, up to 1 paragraph for
             return response.content[0].text
         except Exception as e:
             log_warning(f"Anthropic API call failed: {e}")
+            return None
+
+    def _call_gemini(self, system: str, user: str) -> Optional[str]:
+        try:
+            genai = importlib.import_module("google.genai")
+
+            client_kwargs = {"api_key": self.api_key} if self.api_key else {}
+            client = genai.Client(**client_kwargs)
+            response = client.models.generate_content(
+                model=self.model,
+                contents=f"{system}\n\n{user}",
+            )
+            return response.text
+        except Exception as e:
+            log_warning(f"Gemini API call failed: {e}")
             return None

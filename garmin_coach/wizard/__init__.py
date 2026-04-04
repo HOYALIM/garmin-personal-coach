@@ -5,6 +5,7 @@ from typing import Optional
 
 import yaml
 
+from garmin_coach.wizard.oauth import setup_strava_oauth
 from garmin_coach.profile_manager import (
     ProfileManager,
     ProfileData,
@@ -13,10 +14,12 @@ from garmin_coach.profile_manager import (
     AICoachConfig,
     ScheduleConfig,
     UserProfile,
+    NutritionPreferences,
     Sport,
     FitnessLevel,
     Sex,
     AIFlexibility,
+    AIProvider,
     AITone,
 )
 from garmin_coach.logging_config import log_warning
@@ -100,7 +103,7 @@ def _check_garmin_connection() -> bool:
 
         GARTH_HOME = os.getenv("GARTH_HOME", "~/.garth")
         garth.resume(os.path.expanduser(GARTH_HOME))
-        garth.connectapi("/usersettings", max_retries=1)
+        garth.connectapi("/userprofile-service/socialProfile")
         return True
     except Exception as e:
         log_warning(f"Garmin connection check failed: {e}")
@@ -148,6 +151,8 @@ def _migrate_legacy_config(config: dict) -> dict:
             "ai",
             {
                 "enabled": False,
+                "provider": "auto",
+                "model": None,
                 "tone": "encouraging",
                 "flexibility": "moderate",
             },
@@ -230,6 +235,10 @@ def run_wizard():
         "Fitness level", ["beginner", "intermediate", "advanced"], default=1
     )
     available_days = prompt_number("Training days per week", 1, 7, default=4)
+    assert age is not None
+    assert height is not None
+    assert weight is not None
+    assert available_days is not None
 
     print("\n--- Garmin Connection ---")
     garmin_connected = _check_garmin_connection()
@@ -249,6 +258,8 @@ def run_wizard():
     enable_ai = prompt_yes_no("Enable AI coach?", default=False)
 
     ai_api_key = None
+    ai_provider = AIProvider.AUTO
+    ai_model = None
     ai_tone = AITone.ENCOURAGING
     ai_flexibility = AIFlexibility.MODERATE
 
@@ -256,13 +267,22 @@ def run_wizard():
         print("\nTo use AI coaching, you need an API key:")
         print("  - OpenAI: https://platform.openai.com/api-keys")
         print("  - Anthropic: https://console.anthropic.com/settings/keys")
-        api_key_input = input(
-            "API key (will use env vars OPENAI_API_KEY or ANTHROPIC_API_KEY if empty): "
-        ).strip()
+        print("  - Gemini: https://aistudio.google.com/app/apikey")
+        ai_provider = AIProvider(
+            prompt_choice(
+                "AI provider",
+                ["auto", "openai", "anthropic", "gemini"],
+                default=0,
+            )
+        )
+        api_key_input = input("API key (will use provider env var if empty): ").strip()
 
         if api_key_input:
             ai_api_key = api_key_input
-            print("API key saved securely.")
+            print("API key saved to your local config file.")
+
+        ai_model_input = input("Model override (leave blank for provider default): ").strip()
+        ai_model = ai_model_input or None
 
         print("\nAI coaching style:")
         ai_tone_str = prompt_choice(
@@ -276,8 +296,33 @@ def run_wizard():
         ai_flexibility = AIFlexibility(ai_flexibility_str)
     else:
         print(
-            "\nSkipping AI setup. You can enable it later by setting OPENAI_API_KEY or ANTHROPIC_API_KEY."
+            "\nSkipping AI setup. You can enable it later by setting OPENAI_API_KEY, ANTHROPIC_API_KEY, or GEMINI_API_KEY/GOOGLE_API_KEY."
         )
+
+    print("\n--- Nutrition Preferences (Optional) ---")
+    weight_goal = prompt_choice(
+        "Weight / body-composition goal",
+        ["maintain", "lose", "gain"],
+        default=0,
+    )
+    dietary_style = prompt_choice(
+        "Dietary style",
+        ["omnivore", "vegetarian", "vegan", "other"],
+        default=0,
+    )
+    restrictions_input = input(
+        "Food restrictions / avoidances (comma-separated, or leave blank): "
+    ).strip()
+    food_restrictions = [r.strip() for r in restrictions_input.split(",") if r.strip()]
+    nutrition_coaching_style = prompt_choice(
+        "Nutrition advice style",
+        ["brief", "detailed", "macros"],
+        default=0,
+    )
+
+    connect_strava = prompt_yes_no("Connect Strava now?", default=False)
+    if connect_strava:
+        setup_strava_oauth()
 
     profile = UserProfile(
         profile=ProfileData(
@@ -303,9 +348,17 @@ def run_wizard():
         ),
         ai_coach=AICoachConfig(
             enabled=enable_ai,
+            provider=ai_provider,
+            model=ai_model,
             api_key=ai_api_key,
             tone=ai_tone,
             flexibility=ai_flexibility,
+        ),
+        nutrition=NutritionPreferences(
+            weight_goal=weight_goal,
+            dietary_style=dietary_style,
+            food_restrictions=food_restrictions,
+            coaching_style=nutrition_coaching_style,
         ),
     )
 
@@ -316,7 +369,7 @@ def run_wizard():
     if not garmin_connected:
         print("  1. Run 'garth login your@email.com' to connect Garmin")
     print("  2. Run 'garmin-coach status' to check your training status")
-    print("  3. (Optional) Set up Telegram bot for mobile notifications")
+    print("  3. (Optional) Run 'garmin-coach-telegram' for mobile notifications")
     print()
 
 

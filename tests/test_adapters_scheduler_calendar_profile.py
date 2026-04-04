@@ -246,7 +246,8 @@ def test_fetch_and_adapter_remaining_paths(monkeypatch, tmp_path):
             is_authenticated=lambda: True,
         ),
     )
-    assert fetcher.primary_source() is fetcher.get_source("strava")
+    # Phase 2: Strava is supplemental, not a primary-source fallback.
+    assert fetcher.primary_source() is None
     fetcher.register(
         "broken",
         SimpleNamespace(
@@ -437,7 +438,7 @@ def test_fetch_and_adapter_remaining_paths(monkeypatch, tmp_path):
     acts = adapter.get_activities(datetime(2026, 3, 28), datetime(2026, 3, 29), sport_type="run")
     assert acts[0].sport_type == "run"
     adapter.get_activities = lambda start, end=None, sport_type=None: acts
-    assert adapter.get_daily_summary(datetime(2026, 3, 29)).total_distance_km == 5.0
+    assert adapter.get_daily_summary(datetime(2026, 3, 29)) is None
     adapter = strava.StravaAdapter()
     adapter._token = {"access_token": "tok"}
     monkeypatch.setattr(

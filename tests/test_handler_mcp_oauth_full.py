@@ -12,9 +12,9 @@ def test_oauth_flow_and_status(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(oauth, "CONFIG_DIR", str(tmp_path))
 
     class FakeHandler:
-        received_params = {"code": ["abc"]}
+        received_params = {"code": ["abc"], "state": ["state123"], "scope": ["activity:read"]}
 
-    next_params = {"value": {"code": ["abc"]}}
+    next_params = {"value": {"code": ["abc"], "state": ["state123"], "scope": ["activity:read"]}}
 
     class FakeServer:
         def __init__(self, addr, handler):
@@ -39,6 +39,7 @@ def test_oauth_flow_and_status(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(oauth.threading, "Thread", FakeThread)
     monkeypatch.setattr(oauth.time, "sleep", lambda x: None)
     monkeypatch.setattr(oauth.webbrowser, "open", lambda url: True)
+    monkeypatch.setattr(oauth.secrets, "token_urlsafe", lambda n: "state123")
     monkeypatch.setitem(
         __import__("sys").modules,
         "requests",
@@ -49,12 +50,13 @@ def test_oauth_flow_and_status(monkeypatch, tmp_path, capsys):
         ),
     )
     token = oauth.OAuthFlow.strava_auth("cid", "secret", redirect_port=9999)
+    assert token is not None
     assert token["access_token"] == "tok"
 
-    next_params["value"] = {"state": ["no_code"]}
+    next_params["value"] = {"state": ["state123"]}
     assert oauth.OAuthFlow.strava_auth("cid", "secret", redirect_port=9999) is None
 
-    next_params["value"] = {"code": ["abc"]}
+    next_params["value"] = {"code": ["abc"], "state": ["state123"], "scope": ["activity:read"]}
     monkeypatch.setitem(
         __import__("sys").modules,
         "requests",
@@ -68,6 +70,10 @@ def test_oauth_flow_and_status(monkeypatch, tmp_path, capsys):
     assert oauth.OAuthFlow.check_strava_token() is True
     oauth.OAuthFlow.save_strava_token({"access_token": "tok", "expires_at": 1})
     monkeypatch.setattr(oauth.time, "time", lambda: 100)
+    assert oauth.OAuthFlow.check_strava_token() is False
+
+    oauth.OAuthFlow.save_strava_token({"refresh_token": "refresh-only"})
+    monkeypatch.setattr(oauth.OAuthFlow, "refresh_strava_token", lambda: None)
     assert oauth.OAuthFlow.check_strava_token() is False
 
     token_file = tmp_path / "strava_token.json"
@@ -177,7 +183,15 @@ def test_handler_paths(monkeypatch):
         lambda: {"name": "Pat", "has_data": True, "ctl": 55, "atl": 35, "tsb": -30},
     )
     monkeypatch.setattr(handler, "detect_intent", lambda message: handler.Intent.WORKOUT_COMPLETE)
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "garmin_coach.integrations.garmin",
+        SimpleNamespace(
+            sync_garmin_training_load=lambda days=1, dry_run=False: {"added": 1, "updated": 0}
+        ),
+    )
     assert "Recovery is crucial" in h.handle("done", client_key="x")
+    assert "Synced 1 Garmin day" in h.handle("done-again", client_key="x2")
 
     monkeypatch.setattr(
         handler,
@@ -237,6 +251,32 @@ def test_handler_paths(monkeypatch):
     h2 = handler.MessageHandler(config={"ai": {}}, user_context={})
     assert h2.handle("hello", client_key="g") == "ai ok"
     assert fake_ai_calls == ["envkey"]
+
+    fake_ai_calls.clear()
+    h2_disabled = handler.MessageHandler(config={"ai": {"enabled": False}}, user_context={})
+    assert "coach" in h2_disabled.handle("hello", client_key="g-disabled")
+    assert fake_ai_calls == []
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-env")
+    provider_calls = []
+
+    class ProviderAwareAI:
+        def __init__(self, **kwargs):
+            provider_calls.append(kwargs)
+
+        def generate_response(self, message, context):
+            return "provider ok"
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "garmin_coach.ai_simple",
+        SimpleNamespace(AICoach=ProviderAwareAI),
+    )
+    h2b = handler.MessageHandler(
+        config={"ai": {"provider": "anthropic", "model": "claude-sonnet"}}, user_context={}
+    )
+    assert h2b.handle("hello", client_key="g2") == "provider ok"
+    assert provider_calls == [{"provider": "anthropic", "model": "claude-sonnet"}]
 
     class BrokenAI:
         def __init__(self, api_key):

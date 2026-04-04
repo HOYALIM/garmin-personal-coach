@@ -64,11 +64,37 @@ class AITone(str, Enum):
     MOTIVATIONAL = "motivational"
 
 
+class AIProvider(str, Enum):
+    AUTO = "auto"
+    OPENAI = "openai"
+    ANTHROPIC = "anthropic"
+    GEMINI = "gemini"
+
+
 class NotificationMethod(str, Enum):
     PRINT = "print"
     NOTIFY_SEND = "notify-send"
     TELEGRAM = "telegram"
     DISCORD = "discord"
+
+
+class WeightGoal(str, Enum):
+    MAINTAIN = "maintain"
+    LOSE = "lose"
+    GAIN = "gain"
+
+
+class DietaryStyle(str, Enum):
+    OMNIVORE = "omnivore"
+    VEGETARIAN = "vegetarian"
+    VEGAN = "vegan"
+    OTHER = "other"
+
+
+class NutritionCoachingStyle(str, Enum):
+    BRIEF = "brief"
+    DETAILED = "detailed"
+    MACROS = "macros"
 
 
 class GarMiniAuthMethod(str, Enum):
@@ -187,8 +213,25 @@ class ScheduleConfig:
 
 
 @dataclass
+class NutritionPreferences:
+    weight_goal: str = "maintain"  # "maintain", "lose", "gain"
+    dietary_style: str = "omnivore"  # "omnivore", "vegetarian", "vegan", "other"
+    food_restrictions: list[str] = field(default_factory=list)
+    coaching_style: str = "brief"  # "brief", "detailed", "macros"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "NutritionPreferences":
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
 class AICoachConfig:
     enabled: bool = True
+    provider: AIProvider = AIProvider.AUTO
+    model: str | None = None
     flexibility: AIFlexibility = AIFlexibility.MODERATE
     tone: AITone = AITone.ENCOURAGING
     can_modify_plan: bool = True
@@ -198,6 +241,7 @@ class AICoachConfig:
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
+        d["provider"] = self.provider.value
         d["flexibility"] = self.flexibility.value
         d["tone"] = self.tone.value
         d["notification_method"] = self.notification_method.value
@@ -206,6 +250,7 @@ class AICoachConfig:
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> AICoachConfig:
         d = dict(d)
+        d["provider"] = AIProvider(d.get("provider", "auto"))
         d["flexibility"] = AIFlexibility(d.get("flexibility", "moderate"))
         d["tone"] = AITone(d.get("tone", "encouraging"))
         d["notification_method"] = NotificationMethod(d.get("notification_method", "print"))
@@ -221,6 +266,7 @@ class UserProfile:
     garmin: GarminConfig = field(default_factory=GarminConfig)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     ai_coach: AICoachConfig = field(default_factory=AICoachConfig)
+    nutrition: NutritionPreferences = field(default_factory=NutritionPreferences)
     version: str = "1.0"
     created_at: str | None = None
     updated_at: str | None = None
@@ -235,10 +281,11 @@ class UserProfile:
             "garmin": self.garmin.to_dict(),
             "schedule": self.schedule.to_dict(),
             "ai_coach": self.ai_coach.to_dict(),
+            "nutrition": self.nutrition.to_dict(),
         }
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> UserProfile:
+    def from_dict(cls, d: dict[str, Any]) -> "UserProfile":
         now = datetime.now().isoformat()
         return cls(
             version=d.get("version", "1.0"),
@@ -249,6 +296,7 @@ class UserProfile:
             garmin=GarminConfig.from_dict(d.get("garmin", {})),
             schedule=ScheduleConfig.from_dict(d.get("schedule", {})),
             ai_coach=AICoachConfig.from_dict(d.get("ai_coach", {})),
+            nutrition=NutritionPreferences.from_dict(d.get("nutrition", {})),
         )
 
 
@@ -469,15 +517,15 @@ class ProfileManager:
         if max_hr is None:
             max_hr = 220 - user_profile.profile.age
         return HRZones(
-            z1_min=_pct(max_hr, 50),
-            z1_max=_pct(max_hr, 60),
-            z2_min=_pct(max_hr, 60),
-            z2_max=_pct(max_hr, 70),
-            z3_min=_pct(max_hr, 70),
-            z3_max=_pct(max_hr, 80),
-            z4_min=_pct(max_hr, 80),
-            z4_max=_pct(max_hr, 90),
-            z5_min=_pct(max_hr, 90),
+            z1_min=int(_pct(max_hr, 50)),
+            z1_max=int(_pct(max_hr, 60)),
+            z2_min=int(_pct(max_hr, 60)),
+            z2_max=int(_pct(max_hr, 70)),
+            z3_min=int(_pct(max_hr, 70)),
+            z3_max=int(_pct(max_hr, 80)),
+            z4_min=int(_pct(max_hr, 80)),
+            z4_max=int(_pct(max_hr, 90)),
+            z5_min=int(_pct(max_hr, 90)),
             z5_max=max_hr,
         )
 

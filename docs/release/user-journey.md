@@ -8,8 +8,8 @@ _The path a real user should follow today. Does not cover future features._
 
 - Python 3.10 or higher
 - A Garmin Connect account with activity history
-- Optional: OpenAI or Anthropic API key (for AI-enhanced coaching)
-- Optional: Telegram bot token (for mobile use)
+- Optional: OpenAI, Anthropic, or Gemini API key (for AI-enhanced coaching)
+- Optional: Telegram bot token from BotFather (for mobile use)
 
 ---
 
@@ -17,14 +17,14 @@ _The path a real user should follow today. Does not cover future features._
 
 **From PyPI:**
 ```bash
-pip install garmin-personal-coach
+pip install garmin-personal-coach[all]
 ```
 
 **From source:**
 ```bash
 git clone https://github.com/HOYALIM/garmin-personal-coach.git
 cd garmin-personal-coach
-pip install -e .
+pip install -e .[all]
 ```
 
 **With optional features:**
@@ -67,23 +67,23 @@ Profile is saved to `~/.config/garmin_coach/config.yaml`.
 
 Strava provides supplemental activity data alongside Garmin.
 
-> **Note:** Strava OAuth is not a guided wizard yet. You must supply an access token manually.
-
 1. Create a Strava API app at [strava.com/settings/api](https://www.strava.com/settings/api)
-2. Obtain an access token via OAuth
-3. Save it manually:
+2. Run:
 
 ```bash
-cat > ~/.config/garmin_coach/strava_token.json <<EOF
-{
-  "access_token": "your_access_token",
-  "refresh_token": "your_refresh_token",
-  "expires_at": 9999999999
-}
-EOF
+garmin-coach connect-strava
 ```
 
-> **Limitation:** CTL/ATL calculations from Strava use simplified math, not the full PMC model. Garmin-sourced training load is more accurate.
+3. Enter your Strava Client ID / Client Secret when prompted
+4. Complete the browser OAuth flow
+5. Optional sync check:
+
+```bash
+garmin-coach oauth-status
+garmin-coach strava-sync --dry-run
+```
+
+> **Important:** Strava is supplemental only. Garmin remains the primary source of truth. Strava sync is manual (`garmin-coach strava-sync`) in the current release.
 
 ---
 
@@ -94,6 +94,9 @@ EOF
 ```bash
 garmin-coach status     # Today's training status and coaching
 garmin-coach log        # Log a completed workout
+garmin-coach oauth-status
+garmin-coach garmin-sync --dry-run
+garmin-coach strava-sync --dry-run
 garmin-coach --version  # Check version
 garmin-coach --check-updates
 ```
@@ -102,8 +105,14 @@ garmin-coach --check-updates
 
 ```bash
 export TELEGRAM_BOT_TOKEN="your_bot_token"
-python -m telegram.bot
+garmin-coach-telegram
 ```
+
+To create a Telegram bot token:
+1. Open Telegram
+2. Talk to **@BotFather**
+3. Create a new bot
+4. Copy the bot token into `TELEGRAM_BOT_TOKEN`
 
 Commands:
 - `/start` — Start
@@ -119,8 +128,21 @@ Add to `claude_desktop_config.json`:
 {
   "mcpServers": {
     "garmin-coach": {
+      "command": "garmin-coach-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+Fallback if the console script is not on PATH:
+
+```json
+{
+  "mcpServers": {
+    "garmin-coach": {
       "command": "python",
-      "args": ["-m", "mcp"]
+      "args": ["-m", "mcp_server"]
     }
   }
 }
@@ -144,6 +166,7 @@ export CALENDAR_NAME="Training"
 
 - **Garmin Connect is required.** The product does not work without it.
 - **AI is optional.** Rule-based coaching works without an API key, but responses are less personalized.
-- **Strava requires manual token setup.** There is no guided OAuth flow yet.
+- **Strava is supplemental.** Garmin remains the primary source of truth. Strava sync is manual in this release.
+- **Nutrition coaching is lightweight.** It personalizes guidance from your setup preferences and training context, but it is not meal tracking or photo-based calorie estimation yet.
 - **No web dashboard.** CLI, Telegram, and MCP are the only interfaces available now.
 - **No mobile app.** Telegram is the mobile-friendly path.

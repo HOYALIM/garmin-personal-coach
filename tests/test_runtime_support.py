@@ -246,3 +246,107 @@ def test_mcp_server_main_entry(monkeypatch):
 
     assert captured["name"] == "garmin-personal-coach"
     assert captured["run"] == ("read", "write", {"ok": True})
+
+
+def test_mcp_entrypoint_version_and_run(monkeypatch, capsys):
+    import mcp_server.entrypoint as entry
+
+    called = []
+
+    async def fake_async_main():
+        called.append("ran")
+
+    monkeypatch.setattr(entry.sys, "argv", ["garmin-coach-mcp", "--version"])
+    assert entry.main() == 0
+    assert "garmin-coach-mcp" in capsys.readouterr().out
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "mcp_server.__main__",
+        SimpleNamespace(main=fake_async_main),
+    )
+    monkeypatch.setattr(entry.sys, "argv", ["garmin-coach-mcp"])
+    assert entry.main() == 0
+    assert called == ["ran"]
+
+
+def test_cli_strava_commands(monkeypatch, capsys):
+    import garmin_coach.cli as cli
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "garmin_coach.wizard.oauth",
+        SimpleNamespace(
+            setup_strava_oauth=lambda: True,
+            check_oauth_status=lambda: {"garmin": True, "strava": False},
+        ),
+    )
+
+    assert cli._run_command(["connect-strava"]) == 0
+    assert cli._run_command(["oauth-status"]) == 0
+    out = capsys.readouterr().out
+    assert "garmin: connected" in out
+    assert "strava: not connected" in out
+
+
+def test_cli_strava_sync_command(monkeypatch, capsys):
+    import garmin_coach.cli as cli
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "garmin_coach.integrations.strava",
+        SimpleNamespace(
+            sync_strava_training_load=lambda days=30, dry_run=False: {
+                "days": days,
+                "dry_run": dry_run,
+                "added": 1,
+            }
+        ),
+    )
+
+    assert cli._run_command(["strava-sync", "--days", "14", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "'days': 14" in out
+    assert "'dry_run': True" in out
+
+
+def test_cli_main_accepts_subcommand_flags(monkeypatch, capsys):
+    import garmin_coach.cli as cli
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "garmin_coach.integrations.strava",
+        SimpleNamespace(
+            sync_strava_training_load=lambda days=30, dry_run=False: {
+                "days": days,
+                "dry_run": dry_run,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        cli.sys, "argv", ["garmin-coach", "strava-sync", "--days", "5", "--dry-run"]
+    )
+
+    assert cli.main() == 0
+    out = capsys.readouterr().out
+    assert "'days': 5" in out
+    assert "'dry_run': True" in out
+
+
+def test_cli_strava_sync_handles_runtime_error(monkeypatch, capsys):
+    import garmin_coach.cli as cli
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "garmin_coach.integrations.strava",
+        SimpleNamespace(
+            sync_strava_training_load=lambda days=30, dry_run=False: (_ for _ in ()).throw(
+                RuntimeError(
+                    "Strava is not authenticated. Run 'garmin-coach connect-strava' first."
+                )
+            )
+        ),
+    )
+
+    assert cli._run_command(["strava-sync"]) == 1
+    assert "Strava is not authenticated" in capsys.readouterr().err

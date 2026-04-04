@@ -1,5 +1,5 @@
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 
@@ -145,7 +145,7 @@ def test_weekly_review_flow(monkeypatch, tmp_path, capsys):
     calc = TrainingLoadCalculator(sex="male")
     monday = date(2026, 3, 23)
     for i in range(3):
-        calc.add_session(monday, 50 + i, Sport.RUNNING, 45, f"run {i}")
+        calc.add_session(monday + timedelta(days=i), 50 + i, Sport.RUNNING, 45, f"run {i}")
 
     profile = UserProfile(profile=ProfileData(name="Pat", goal_date="2026-04-30"))
     monkeypatch.setattr(weekly_review, "resume_garth", lambda: True)
@@ -155,9 +155,6 @@ def test_weekly_review_flow(monkeypatch, tmp_path, capsys):
         weekly_review.ProfileManager, "calculate_all_zones", lambda self, profile: None
     )
     monkeypatch.setattr(
-        weekly_review, "fetch_recent_activities", lambda *args, **kwargs: [{"type": "run"}]
-    )
-    monkeypatch.setattr(
         weekly_review.AICoachEngine,
         "weekly_review_advice",
         lambda self, ctx: SimpleNamespace(source="rule_based", text="weekly ok"),
@@ -165,8 +162,9 @@ def test_weekly_review_flow(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(
         weekly_review.AICoachEngine, "format_message", lambda self, msg: f"fmt:{msg.text}"
     )
-    monkeypatch.setattr(weekly_review, "DATA_DIR", tmp_path)
-    (tmp_path / "training_load.json").write_text(calc.export_json())
+    monkeypatch.setattr(
+        weekly_review, "get_training_load_manager", lambda: SimpleNamespace(calculator=calc)
+    )
 
     weekly_review.run_weekly(monday)
     out = capsys.readouterr().out

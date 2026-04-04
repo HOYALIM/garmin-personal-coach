@@ -13,27 +13,12 @@ def test_more_cleanup_wave(monkeypatch, capsys, tmp_path):
     import garmin_coach.setup_wizard as setup_wizard
     import garmin_coach.workout_review as workout_review
 
-    calc_file = tmp_path / "training_load.json"
-    calc_file.write_text("{}")
     monkeypatch.setattr(evening, "DATA_DIR", tmp_path)
     monkeypatch.setattr(evening, "resume_garth", lambda: True)
     monkeypatch.setattr(evening, "ProfileManager", lambda: SimpleNamespace(exists=lambda: True))
     monkeypatch.setattr(evening, "save_evening_data", lambda *args: None)
-    loaded = []
-
-    class FakeCalc:
-        def __init__(self, sex="male"):
-            self.sex = sex
-
-        def export_json(self):
-            return "{}"
-
-        @staticmethod
-        def from_json(path):
-            loaded.append(path)
-            return SimpleNamespace(export_json=lambda: "{}")
-
-    monkeypatch.setattr(evening, "TrainingLoadCalculator", FakeCalc)
+    fake_manager = SimpleNamespace(calculator=SimpleNamespace())
+    monkeypatch.setattr(evening, "get_training_load_manager", lambda: fake_manager)
     monkeypatch.setattr(evening, "build_evening_context", lambda *args: "ctx")
     monkeypatch.setattr(
         evening,
@@ -44,9 +29,9 @@ def test_more_cleanup_wave(monkeypatch, capsys, tmp_path):
         ),
     )
     evening.run_evening("2026-03-29", auto=True)
-    assert loaded and loaded[0] == calc_file
     monkeypatch.setattr("sys.argv", ["evening_checkin", "--auto"])
-    runpy.run_module("garmin_coach.evening_checkin", run_name="__main__")
+    monkeypatch.setattr(evening, "ProfileManager", lambda: SimpleNamespace(exists=lambda: False))
+    evening.main()
     assert "No profile found" in capsys.readouterr().out
 
     assert "Good session" in handler.MessageHandler(

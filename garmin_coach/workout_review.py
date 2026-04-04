@@ -9,6 +9,7 @@ from typing import Any
 
 from garmin_coach.activity_fetch import fetch_recent_activities, resume_garth
 from garmin_coach.calendar_sync import find_and_update_workout_event
+from garmin_coach.integrations.ingest import upsert_activity_to_training_load
 from garmin_coach.logging_config import log_warning
 from garmin_coach.models import ActivitySummary, WorkoutLog
 
@@ -147,6 +148,13 @@ def write_log(
     md_path.write_text(build_md(log))
     log.synced["markdown"] = True
     json_path.write_text(json.dumps(log.to_dict(), ensure_ascii=False, indent=2))
+    if log.activity:
+        upsert_activity_to_training_load(
+            session_date=date.fromisoformat(target_date),
+            activity=log.activity,
+            source_tag="garmin-review",
+            description=f"[garmin-review] {log.activity.type or 'workout'}",
+        )
     return log
 
 

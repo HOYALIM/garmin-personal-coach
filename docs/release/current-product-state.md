@@ -17,16 +17,16 @@ Garmin Personal Coach is a Garmin-first AI coaching tool for endurance athletes.
 | Source | Status | Notes |
 |--------|--------|-------|
 | Garmin Connect | **Supported** | Core data source. Auth via `garth`. Activities, HR, training load. |
-| Strava | **Partial** | Adapter implemented. Activity fetch and profile work. CTL/ATL calculations are placeholder math, not real PMC. OAuth setup is not a guided wizard — token must be supplied manually. |
+| Strava | **Supported (supplemental)** | OAuth flow available via `garmin-coach connect-strava` or setup wizard. Supplemental sync via `garmin-coach strava-sync`; Garmin remains authoritative. |
 | Nike Run Club | **Not supported** | Stub file exists. No usable integration. |
 
 ### Interfaces
 
 | Interface | Status | Notes |
 |-----------|--------|-------|
-| CLI (`garmin-coach`) | **Supported** | `setup`, `status`, `log`, `--check-updates`, `--version` |
-| Telegram bot | **Supported** | Natural language coaching. Requires self-hosted bot token. Korean and English. |
-| MCP server | **Supported** | JSON-RPC server compatible with Claude Desktop, Cursor. Tools: `get_training_status`, `get_user_profile`, `get_recent_activities`, `handle_natural_language`, `get_training_plan`, `health`. |
+| CLI (`garmin-coach`) | **Supported** | `setup`, `status`, `log`, `oauth-status`, `connect-strava`, `strava-sync`, `garmin-sync`, `--check-updates`, `--version` |
+| Telegram bot | **Supported** | Natural language coaching via `garmin-coach-telegram`. Requires user-provisioned Telegram bot token. |
+| MCP server | **Supported** | Compatible with OpenClaw / Claude Desktop / Cursor via `garmin-coach-mcp` or `python -m mcp_server`. Tools: `get_training_status`, `get_user_profile`, `get_recent_activities`, `handle_natural_language`, `get_training_plan`, `health`. |
 | Web dashboard | **Not supported** | Not built. |
 | iMessage | **Not supported** | Not built. |
 | Apple HealthKit | **Not supported** | Requires native iOS app. Not in this repo. |
@@ -35,8 +35,9 @@ Garmin Personal Coach is a Garmin-first AI coaching tool for endurance athletes.
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| AI-enhanced responses | **Supported (optional)** | Requires OpenAI or Anthropic API key. Without AI key, rule-based coaching still works. |
+| AI-enhanced responses | **Supported (optional)** | Supports OpenAI, Anthropic, or Gemini. Without API keys, rule-based coaching still works. |
 | Natural language input | **Supported** | Korean and English. |
+| Lightweight nutrition coaching | **Supported** | Personalized by weight goal, dietary style, restrictions, and coaching style. Not meal tracking. |
 
 ### Training Features
 
@@ -53,12 +54,11 @@ Garmin Personal Coach is a Garmin-first AI coaching tool for endurance athletes.
 
 | Feature | Category | Why |
 |---------|----------|-----|
-| Strava OAuth wizard | **Planned** | Token must be manually supplied today. Guided OAuth flow not yet built. |
-| Strava real training load | **Planned** | CTL/ATL from Strava uses simplified placeholder math. |
+| Strava full independent authority | **Not planned now** | Strava is intentionally supplemental; Garmin remains primary runtime truth. |
 | Web dashboard | **Planned** | Not built. Specs exist in `docs/specs/`. |
 | Nike Run Club | **Blocked / Deferred** | No public API. See `docs/research/nike-run-club-feasibility.md`. |
 | Apple HealthKit | **Separate track** | Requires native iOS app. Python backend prep possible now. See `docs/research/healthkit-feasibility.md`. |
-| iMessage | **Not planned** | No implementation or spec. |
+| iMessage | **Planned later** | No implementation yet. README marks this as next update, not current release scope. |
 | Apple Watch native | **Separate track** | Requires watchOS app. Not in scope for this repo. |
 
 ---
@@ -66,7 +66,7 @@ Garmin Personal Coach is a Garmin-first AI coaching tool for endurance athletes.
 ## Configuration
 
 - Profile: `~/.config/garmin_coach/config.yaml`
-- Strava token: `~/.config/garmin_coach/strava_token.json` (manually created)
+- Strava token: `~/.config/garmin_coach/strava_token.json` (created by OAuth flow)
 - Garmin session: managed by `garth` library
 
 ---

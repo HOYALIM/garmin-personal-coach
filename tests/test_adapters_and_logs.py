@@ -154,6 +154,14 @@ def test_training_log_and_workout_review(monkeypatch, tmp_path):
     monkeypatch.setattr(training_log, "EVENING_DIR", evening_dir)
     monkeypatch.setattr(training_log, "TRAINING_MD_DIR", training_md)
     monkeypatch.setattr(training_log, "TRAINING_JSON_DIR", training_json)
+    ingest_calls = []
+    monkeypatch.setattr(
+        training_log,
+        "upsert_activity_to_training_load",
+        lambda session_date, activity, source_tag, description=None: ingest_calls.append(
+            (session_date.isoformat(), source_tag, description)
+        ),
+    )
     monkeypatch.setattr(
         training_log,
         "parse_args",
@@ -176,10 +184,19 @@ def test_training_log_and_workout_review(monkeypatch, tmp_path):
     )
     training_log.main()
     assert (training_md / "2026-03-29.md").exists()
+    assert ingest_calls[0][0] == "2026-03-29"
+    assert ingest_calls[0][1] == "manual-log"
 
     monkeypatch.setattr(workout_review, "TRAINING_MD_DIR", training_md)
     monkeypatch.setattr(workout_review, "TRAINING_JSON_DIR", training_json)
     monkeypatch.setattr(workout_review, "SNAPSHOT_DIR", snapshot_dir)
+    monkeypatch.setattr(
+        workout_review,
+        "upsert_activity_to_training_load",
+        lambda session_date, activity, source_tag, description=None: ingest_calls.append(
+            (session_date.isoformat(), source_tag, description)
+        ),
+    )
     monkeypatch.setattr(workout_review, "resume_garth", lambda: True)
     monkeypatch.setattr(
         workout_review,
@@ -219,3 +236,97 @@ def test_training_log_and_workout_review(monkeypatch, tmp_path):
     )
     workout_review.main()
     assert (training_json / "2026-03-29.json").exists()
+    assert ingest_calls[-1][1] == "garmin-review"
+
+
+def test_training_log_duration_only_still_updates_load(monkeypatch, tmp_path):
+    import garmin_coach.training_log as training_log
+
+    data_dir = tmp_path / "data"
+    snapshot_dir = data_dir / "snapshots"
+    evening_dir = data_dir / "evening_reviews"
+    training_md = data_dir / "training_logs"
+    training_json = data_dir / "training_log_json"
+    for path in [snapshot_dir, evening_dir, training_md, training_json]:
+        path.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(training_log, "SNAPSHOT_DIR", snapshot_dir)
+    monkeypatch.setattr(training_log, "EVENING_DIR", evening_dir)
+    monkeypatch.setattr(training_log, "TRAINING_MD_DIR", training_md)
+    monkeypatch.setattr(training_log, "TRAINING_JSON_DIR", training_json)
+    ingest_calls = []
+    monkeypatch.setattr(
+        training_log,
+        "upsert_activity_to_training_load",
+        lambda session_date, activity, source_tag, description=None: ingest_calls.append(
+            (session_date.isoformat(), activity.duration_min, source_tag)
+        ),
+    )
+    monkeypatch.setattr(
+        training_log,
+        "parse_args",
+        lambda: SimpleNamespace(
+            date="2026-03-29",
+            completed="duration only",
+            distance_km=None,
+            duration_min=40.0,
+            avg_pace="",
+            avg_hr=None,
+            energy=4,
+            legs=3,
+            mood=4,
+            pain=False,
+            illness=False,
+            notes="steady",
+            tomorrow_note="easy",
+            source="manual",
+        ),
+    )
+    training_log.main()
+    assert ingest_calls == [("2026-03-29", 40.0, "manual-log")]
+
+
+def test_primary_source_is_garmin_only(monkeypatch):
+    """primary_source() returns Garmin when present, and None when only
+    Strava is registered — Strava is not a fallback primary source."""
+    from garmin_coach.adapters.fetch import UnifiedFetcher
+
+    garmin_src = object()
+    strava_src = object()
+
+    fetcher = UnifiedFetcher()
+    # No sources → None
+    assert fetcher.primary_source() is None
+
+    # Strava only → None (not a runtime primary)
+    fetcher.register("strava", strava_src)
+    assert fetcher.primary_source() is None
+
+    # Garmin added → Garmin wins
+    fetcher.register("garmin", garmin_src)
+    assert fetcher.primary_source() is garmin_src
+
+
+def test_merged_daily_summary_excludes_strava():
+    """Strava is never consulted for merged_daily_summary — Garmin is the
+    only authoritative training-load source via this path."""
+    from datetime import datetime
+    from garmin_coach.adapters.fetch import UnifiedFetcher
+
+    consulted = []
+
+    class FakeSource:
+        def __init__(self, name):
+            self.name = name
+
+        def get_daily_summary(self, date):
+            consulted.append(self.name)
+            return None
+
+    fetcher = UnifiedFetcher()
+    fetcher.register("garmin", FakeSource("garmin"))
+    fetcher.register("strava", FakeSource("strava"))
+    fetcher.merged_daily_summary(datetime.now())
+
+    assert "garmin" in consulted
+    assert "strava" not in consulted

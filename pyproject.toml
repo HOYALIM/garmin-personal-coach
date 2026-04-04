@@ -28,6 +28,7 @@ dependencies = [
     "garth>=0.4.0",
     "logfire",
     "pyyaml>=6.0",
+    "requests>=2.0.0",
     "tenacity",
 ]
 
@@ -45,6 +46,7 @@ telegram = [
 ai = [
     "openai>=1.0.0",
     "anthropic>=0.18.0",
+    "google-genai>=1.0.0",
 ]
 all = [
     "mcp>=1.1.0",
@@ -52,11 +54,14 @@ all = [
     "python-telegram-bot>=20.0",
     "openai>=1.0.0",
     "anthropic>=0.18.0",
+    "google-genai>=1.0.0",
 ]
 
 [project.scripts]
 garmin-coach = "garmin_coach.cli:main"
 gc = "garmin_coach.cli:main"
+garmin-coach-telegram = "garmin_coach.telegram_bot:main"
+garmin-coach-mcp = "mcp_server.entrypoint:main"
 
 [project.urls]
 Homepage = "https://github.com/HOYALIM/garmin-personal-coach"

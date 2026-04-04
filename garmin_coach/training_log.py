@@ -6,6 +6,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from garmin_coach.integrations.ingest import upsert_activity_to_training_load
 from garmin_coach.logging_config import log_warning
 from garmin_coach.models import ActivitySummary, SubjectiveRating, WorkoutLog
 
@@ -97,7 +98,12 @@ def main() -> None:
     log.final_status = snapshot.get("status")
     log.completed = args.completed or evening.get("completed", "")
 
-    if args.distance_km is not None or args.avg_pace or args.avg_hr is not None:
+    if (
+        args.distance_km is not None
+        or args.duration_min is not None
+        or args.avg_pace
+        or args.avg_hr is not None
+    ):
         log.activity = ActivitySummary(
             distance_km=args.distance_km,
             duration_min=args.duration_min,
@@ -123,6 +129,13 @@ def main() -> None:
     md_path.write_text(build_md(log))
     log.synced["markdown"] = True
     json_path.write_text(json.dumps(log.to_dict(), ensure_ascii=False, indent=2))
+    if log.activity:
+        upsert_activity_to_training_load(
+            session_date=date.fromisoformat(args.date),
+            activity=log.activity,
+            source_tag="manual-log",
+            description=f"[manual-log] {log.completed or 'manual workout'}",
+        )
     print(f"Saved: {md_path}")
 
 

@@ -22,12 +22,12 @@ def test_wizard_init_last_lines(monkeypatch):
     monkeypatch.setattr(wizard, "prompt_yes_no", lambda *args, **kwargs: False)
     monkeypatch.setattr(wizard, "_check_garmin_connection", lambda: False)
 
-    inputs = iter(["oops", "1", "Race", "bad-date", "", ""])
+    inputs = iter(["oops", "1", "Race", "bad-date", "", "", "", "", "n"])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
     wizard.run_wizard()
     assert saved[-1].profile.sports == [profile_manager.Sport.RUNNING]
 
-    inputs = iter(["", "Race", "", "", ""])
+    inputs = iter(["", "Race", "", "", "", "", "n"])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
     wizard.run_wizard()
     assert saved[-1].profile.sports == [profile_manager.Sport.RUNNING]
@@ -37,5 +37,11 @@ def test_wizard_init_last_lines(monkeypatch):
     )
     with pytest.raises(SystemExit):
         runpy.run_path(
-            "/tmp/garmin-personal-coach/garmin_coach/wizard/__init__.py", run_name="__main__"
+            str(
+                __import__("pathlib").Path(__file__).resolve().parents[1]
+                / "garmin_coach"
+                / "wizard"
+                / "__init__.py"
+            ),
+            run_name="__main__",
         )

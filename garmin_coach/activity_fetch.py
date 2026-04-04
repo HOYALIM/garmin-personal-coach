@@ -1,7 +1,7 @@
 """Garmin data fetching layer (garth adapter)."""
 
 import os
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 import garth
@@ -153,11 +153,8 @@ def fetch_morning_metrics(target_date: str) -> dict[str, Any]:
             body_battery_value = None
 
     readiness_value = getattr(readiness_obj, "score", None) if readiness_obj else None
-    hrv_status = (
-        getattr(readiness_obj, "hrv_factor_feedback", None).lower()
-        if readiness_obj and getattr(readiness_obj, "hrv_factor_feedback", None)
-        else None
-    )
+    hrv_feedback = getattr(readiness_obj, "hrv_factor_feedback", None) if readiness_obj else None
+    hrv_status = hrv_feedback.lower() if isinstance(hrv_feedback, str) and hrv_feedback else None
 
     return {
         "sleep_hours": sleep_hours,
@@ -187,8 +184,11 @@ def mps_to_pace_str(mps: float) -> str:
     return f"{int(min_per_km)}:{int((min_per_km % 1) * 60):02d}/km"
 
 
-def fetch_recent_activities(limit: int = 5) -> list[dict[str, Any]]:
-    raw_activities = safe_get_activities(limit=limit)
+def fetch_recent_activities(
+    limit: int | date = 5, end_date: date | None = None
+) -> list[dict[str, Any]]:
+    limit_count = limit if isinstance(limit, int) else 100
+    raw_activities = safe_get_activities(limit=limit_count)
     results = []
     for act in raw_activities:
         type_key = ""
@@ -213,17 +213,28 @@ def fetch_recent_activities(limit: int = 5) -> list[dict[str, Any]]:
         if avg_hr is not None:
             avg_hr = int(avg_hr)
 
-        results.append(
-            {
-                "activity_id": str(getattr(act, "activity_id", "") or ""),
-                "type": type_key,
-                "start_time": start_local,
-                "distance_km": distance_km,
-                "duration_min": duration_min,
-                "avg_pace": pace_str,
-                "avg_hr": avg_hr,
-                "calories": getattr(act, "calories", None),
-                "activity_name": getattr(act, "activity_name", "") or "",
-            }
-        )
+        item = {
+            "activity_id": str(getattr(act, "activity_id", "") or ""),
+            "type": type_key,
+            "start_time": start_local,
+            "distance_km": distance_km,
+            "duration_min": duration_min,
+            "avg_pace": pace_str,
+            "avg_hr": avg_hr,
+            "calories": getattr(act, "calories", None),
+            "activity_name": getattr(act, "activity_name", "") or "",
+        }
+
+        if isinstance(limit, date):
+            try:
+                activity_date = datetime.fromisoformat(start_local).date() if start_local else None
+            except Exception:
+                activity_date = None
+            if activity_date is None:
+                continue
+            range_end = end_date or limit
+            if not (limit <= activity_date <= range_end):
+                continue
+
+        results.append(item)
     return results

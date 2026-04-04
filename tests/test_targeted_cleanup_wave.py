@@ -97,10 +97,10 @@ def test_targeted_cleanup_branches(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(
         wizard, "prompt_choice", lambda prompt, options, default=0: options[default]
     )
-    yn = iter([True, True, True, False])
+    yn = iter([True, True, True, False, False])
     monkeypatch.setattr(wizard, "prompt_yes_no", lambda *args, **kwargs: next(yn))
     monkeypatch.setattr(wizard, "_check_garmin_connection", lambda: False)
-    inputs = iter(["1 9", "bad-date", "06:00", "22:00", ""])
+    inputs = iter(["1 9", "bad-date", "06:00", "22:00", "", ""])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
     saved = []
     monkeypatch.setattr(wizard.ProfileManager, "save", lambda self, profile: saved.append(profile))
@@ -178,13 +178,15 @@ def test_targeted_cleanup_branches(monkeypatch, capsys, tmp_path):
 
     monkeypatch.setattr(weekly, "date", FakeWeeklyDate)
     monkeypatch.setattr(weekly, "resume_garth", lambda: True)
-    monkeypatch.setattr(weekly, "ProfileManager", lambda: SimpleNamespace(exists=lambda: True))
     monkeypatch.setattr(
         weekly,
-        "TrainingLoadCalculator",
-        lambda sex="male": SimpleNamespace(export_json=lambda: "{}"),
+        "ProfileManager",
+        lambda: SimpleNamespace(
+            exists=lambda: True,
+            load=lambda: SimpleNamespace(profile=SimpleNamespace(goal_date="2026-10-10")),
+            calculate_all_zones=lambda profile: {},
+        ),
     )
-    monkeypatch.setattr(type(tmp_path / "training_load.json"), "exists", lambda self: False)
     monkeypatch.setattr(
         weekly,
         "get_week_stats",
@@ -197,7 +199,16 @@ def test_targeted_cleanup_branches(monkeypatch, capsys, tmp_path):
             "sport_breakdown": {},
         },
     )
-    monkeypatch.setattr(weekly, "fetch_recent_activities", lambda *args: [])
+    monkeypatch.setattr(
+        weekly,
+        "get_training_load_manager",
+        lambda: SimpleNamespace(
+            calculator=SimpleNamespace(
+                get_sessions_in_range=lambda start, end: [],
+                get_snapshot=lambda d: SimpleNamespace(date=d),
+            )
+        ),
+    )
     monkeypatch.setattr(weekly, "build_weekly_context", lambda *args: "ctx")
     monkeypatch.setattr(
         weekly,

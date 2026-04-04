@@ -21,11 +21,10 @@ class UnifiedFetcher:
         return self._sources.get(name)
 
     def primary_source(self) -> Optional[DataSource]:
-        if "garmin" in self._sources:
-            return self._sources["garmin"]
-        if "strava" in self._sources:
-            return self._sources["strava"]
-        return None
+        # Garmin is the only authoritative primary source.
+        # Strava is a supplemental ingestion path via strava-sync; it is
+        # never a runtime fallback for Garmin.
+        return self._sources.get("garmin")
 
     def all_activities(
         self,
@@ -46,8 +45,14 @@ class UnifiedFetcher:
         return all_acts
 
     def merged_daily_summary(self, date: datetime) -> Optional[DailySummary]:
+        # Only Garmin contributes to the authoritative training-load summary.
+        # Strava activities enter via strava-sync → training_load_manager, not
+        # via this path.  StravaAdapter.get_daily_summary() already returns None,
+        # but excluding it here makes the boundary explicit and prevents any
+        # future Strava adapter changes from accidentally leaking into load math.
         summaries = []
-        for name, source in self._sources.items():
+        load_sources = {k: v for k, v in self._sources.items() if k != "strava"}
+        for name, source in load_sources.items():
             try:
                 summary = source.get_daily_summary(date)
                 if summary:

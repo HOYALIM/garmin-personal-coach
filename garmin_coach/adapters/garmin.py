@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import garth
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -15,6 +15,29 @@ from garmin_coach.logging_config import log_error
 
 
 GARTH_HOME = os.path.expanduser(os.getenv("GARTH_HOME", "~/.garth"))
+
+
+def _connectapi_first_success(paths: list[str]) -> Any:
+    last_exc = None
+    for path in paths:
+        try:
+            result = garth.connectapi(path)
+            if result:
+                return result
+        except Exception as exc:
+            last_exc = exc
+    if last_exc and len(paths) == 1:
+        raise last_exc
+    if last_exc:
+        return None
+    return None
+
+
+def _looks_like_user_profile(data: Any) -> bool:
+    return isinstance(data, dict) and any(
+        data.get(key)
+        for key in ("displayName", "fullName", "firstName", "userId", "id", "profileId")
+    )
 
 
 def mps_to_pace_sec_per_km(mps: float) -> Optional[float]:
@@ -32,14 +55,14 @@ def seconds_to_hms(seconds: int) -> str:
 class GarminAdapter(DataSource):
     """Adapter for Garmin Connect using garth."""
 
-    def __init__(self, config: dict = None):
+    def __init__(self, config: Optional[dict] = None):
         self.config = config or {}
         self._profile_cache = None
 
     def is_authenticated(self) -> bool:
         try:
             garth.resume(GARTH_HOME)
-            garth.connectapi("/usersettings", max_retries=1)
+            _connectapi_first_success(["/userprofile-service/socialProfile", "/usersettings"])
             return True
         except Exception as e:
             log_error("Garmin API error in is_authenticated", exc=e)
@@ -53,30 +76,53 @@ class GarminAdapter(DataSource):
             return self._profile_cache
         try:
             garth.resume(GARTH_HOME)
-            user = garth.connectapi("/usersettings")
-            user_info = garth.connectapi("/usersummary")
+            user = _connectapi_first_success(
+                [
+                    "/userprofile-service/socialProfile",
+                    "/usersettings",
+                ]
+            )
+            if not _looks_like_user_profile(user):
+                try:
+                    user = garth.connectapi("/usersettings")
+                except Exception:
+                    user = None
 
-            if not user:
+            try:
+                user_info = garth.connectapi("/usersummary") or {}
+            except Exception:
+                user_info = {}
+
+            if not isinstance(user, dict) or not user:
                 return None
+            if not isinstance(user_info, dict):
+                user_info = {}
 
-            display_name = user.get("displayName") or user.get("firstName", "Athlete")
+            display_name = (
+                user.get("fullName")
+                or user.get("displayName")
+                or user.get("firstName")
+                or "Athlete"
+            )
             age = user.get("age")
             weight = user.get("weight") or user_info.get("weight")
             max_hr = user.get("maxHeartRate")
             rest_hr = user_info.get("restingHeartRate")
 
             ftp = None
-            if user_info and "cyclingSettings" in user_info:
+            if "cyclingSettings" in user_info:
                 ftp = user_info["cyclingSettings"].get("ftp")
 
             sports = []
-            if user_info and "sports" in user_info:
+            if "sports" in user_info:
                 sports = [
                     s.get("sportType", {}).get("typeKey", "unknown") for s in user_info["sports"]
                 ]
 
             self._profile_cache = UserProfile(
-                user_id=user.get("userId", "garmin_user"),
+                user_id=str(
+                    user.get("userId") or user.get("id") or user.get("profileId") or "garmin_user"
+                ),
                 name=display_name,
                 age=age,
                 weight_kg=weight,
@@ -116,8 +162,9 @@ class GarminAdapter(DataSource):
         while current_date <= end_date:
             try:
                 daily = garth.DailySummary.get(current_date.strftime("%Y-%m-%d"))
-                if daily:
-                    for act in daily:
+                daily_entries = daily if isinstance(daily, list) else []
+                if daily_entries:
+                    for act in daily_entries:
                         act_sport = (
                             getattr(act.activity_type, "type_key", None)
                             if hasattr(act, "activity_type")
@@ -163,7 +210,7 @@ class GarminAdapter(DataSource):
         try:
             garth.resume(GARTH_HOME)
             summary = garth.DailySummary.get(date.strftime("%Y-%m-%d"))
-            if not summary:
+            if not summary or isinstance(summary, list):
                 return None
 
             activities = self.get_activities(date, date)
@@ -183,6 +230,10 @@ class GarminAdapter(DataSource):
                 atl=float(atl),
                 tsb=float(tsb),
                 trimp=float(trimp),
+                activities=activities,
+                total_duration_minutes=int(total_duration / 60),
+                total_distance_km=float(total_distance),
+                total_calories=int(total_calories),
             )
         except Exception as e:
             log_error("Garmin API error in get_daily_summary", exc=e)

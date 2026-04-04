@@ -7,14 +7,19 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from garmin_coach.ai_coach import AICoachEngine, CoachContext
-from garmin_coach.activity_fetch import fetch_recent_activities, resume_garth
+from garmin_coach.activity_fetch import resume_garth
 from garmin_coach.profile_manager import ProfileManager
 from garmin_coach.training_load import Sport, TrainingLoadCalculator
+from garmin_coach.training_load_manager import get_training_load_manager
 
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
+
+
+def _activity_payload(activity) -> dict:
+    return activity.to_dict() if hasattr(activity, "to_dict") else activity
 
 
 def get_week_start(target_date: date) -> date:
@@ -36,7 +41,7 @@ def build_weekly_context(
         raise RuntimeError("No profile found. Run setup_wizard first.")
 
     week_end = week_start + timedelta(days=6)
-    activities = fetch_recent_activities(week_start, week_end)
+    activities = calculator.get_sessions_in_range(week_start, week_end)
     snapshot = calculator.get_snapshot(week_end)
     zones = pm.calculate_all_zones(profile)
     week_num = (
@@ -48,9 +53,7 @@ def build_weekly_context(
         user_profile=profile,
         load_snapshot=snapshot,
         zones=zones,
-        recent_activities=[
-            a.to_dict() if hasattr(a, "to_dict") else a for a in activities
-        ],
+        recent_activities=[_activity_payload(a) for a in activities],
         week_number=max(1, week_num),
         phase="weekly_review",
     )
@@ -78,7 +81,8 @@ def run_weekly(target_date: date | None = None) -> None:
     resume_garth()
 
     pm = ProfileManager()
-    if not pm.exists():
+    profile = pm.load() if pm.exists() else None
+    if not profile:
         print("No profile found. Run: python -m garmin_coach.setup_wizard")
         return
 
@@ -87,14 +91,11 @@ def run_weekly(target_date: date | None = None) -> None:
 
     week_start = get_week_start(target_date)
 
-    calc = TrainingLoadCalculator(sex="male")
-    calc_file = DATA_DIR / "training_load.json"
-    if calc_file.exists():
-        calc = TrainingLoadCalculator.from_json(calc_file)
+    calc = get_training_load_manager().calculator
 
     stats = get_week_stats(week_start, calc)
     week_end = week_start + timedelta(days=6)
-    activities = fetch_recent_activities(week_start, week_end)
+    activities = calc.get_sessions_in_range(week_start, week_end)
 
     print(f"\n{format_weekly_summary(stats, activities)}")
 
@@ -104,7 +105,6 @@ def run_weekly(target_date: date | None = None) -> None:
 
     print("\n" + engine.format_message(msg))
 
-    calc_file.write_text(calc.export_json())
     print(f"\n✓ Weekly review saved.")
 
 

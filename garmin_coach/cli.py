@@ -2,6 +2,7 @@
 
 import sys
 import argparse
+from pprint import pprint
 
 from garmin_coach._version import __version__
 from garmin_coach.update_check import check_for_updates, get_update_message
@@ -14,7 +15,7 @@ def main():
     parser.add_argument("--no-update-check", action="store_true", help="Skip update check")
     parser.add_argument("command", nargs="*", help="Command to run")
 
-    args = parser.parse_args()
+    args, extra = parser.parse_known_args()
 
     if args.version:
         print(f"garmin-personal-coach {__version__}")
@@ -35,8 +36,8 @@ def main():
         if msg:
             print(msg, file=sys.stderr)
 
-    if args.command:
-        return _run_command(args.command)
+    if args.command or extra:
+        return _run_command(args.command + extra)
 
     parser.print_help()
     return 0
@@ -49,6 +50,53 @@ def _run_command(command):
         from garmin_coach.wizard import run_wizard
 
         run_wizard()
+    elif cmd == "connect-strava":
+        from garmin_coach.wizard.oauth import setup_strava_oauth
+
+        return 0 if setup_strava_oauth() else 1
+    elif cmd == "oauth-status":
+        from garmin_coach.wizard.oauth import check_oauth_status
+        from garmin_coach.integrations.strava.sync import _load_state
+
+        status = check_oauth_status()
+        for provider, connected in status.items():
+            print(f"{provider}: {'connected' if connected else 'not connected'}")
+
+        # Show Strava sync status when Strava is connected.
+        if status.get("strava"):
+            state = _load_state()
+            last_sync = state.get("days") and max(state["days"].keys(), default=None)
+            synced_days = len(state.get("days", {}))
+            print(
+                f"strava-sync: {synced_days} days in state"
+                + (f", last date {last_sync}" if last_sync else ", no syncs yet")
+            )
+    elif cmd == "strava-sync":
+        from garmin_coach.integrations.strava import sync_strava_training_load
+
+        sync_parser = argparse.ArgumentParser(prog="garmin-coach strava-sync")
+        sync_parser.add_argument("--days", type=int, default=30)
+        sync_parser.add_argument("--dry-run", action="store_true")
+        sync_args = sync_parser.parse_args(command[1:])
+        try:
+            result = sync_strava_training_load(days=sync_args.days, dry_run=sync_args.dry_run)
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        pprint(result)
+    elif cmd == "garmin-sync":
+        from garmin_coach.integrations.garmin import sync_garmin_training_load
+
+        sync_parser = argparse.ArgumentParser(prog="garmin-coach garmin-sync")
+        sync_parser.add_argument("--days", type=int, default=30)
+        sync_parser.add_argument("--dry-run", action="store_true")
+        sync_args = sync_parser.parse_args(command[1:])
+        try:
+            result = sync_garmin_training_load(days=sync_args.days, dry_run=sync_args.dry_run)
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        pprint(result)
     elif cmd == "status":
         from garmin_coach.handler import process_message
 
