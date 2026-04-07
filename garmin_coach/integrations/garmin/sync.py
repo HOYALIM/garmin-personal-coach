@@ -134,7 +134,7 @@ def sync_garmin_training_load(days: int = 30, dry_run: bool = False) -> dict[str
         except ValueError:
             state["days"].pop(previous_date, None)
             continue
-        if previous_date_obj < window_start_date or previous_date in current_dates:
+        if previous_date in current_dates:
             continue
 
         existing = manager.calculator.get_session(previous_date_obj)

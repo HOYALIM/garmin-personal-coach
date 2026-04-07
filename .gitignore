@@ -2,11 +2,15 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+.*-venv/
 .env
 *.egg-info/
 .pytest_cache/
+.ruff_cache/
 data/
 logs/
 snapshots/
 *.json
 .DS_Store
+dist/
+build/

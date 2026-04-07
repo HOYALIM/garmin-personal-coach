@@ -158,7 +158,9 @@ def sync_strava_training_load(days: int = 30, dry_run: bool = False) -> dict[str
             continue
 
         if previous_date_obj < window_start_date:
-            continue
+            boundary_grace_date = window_start_date - timedelta(days=2)
+            if not current_dates or previous_date_obj < boundary_grace_date:
+                continue
 
         if previous_date in current_dates:
             continue
@@ -197,7 +199,9 @@ def sync_strava_training_load(days: int = 30, dry_run: bool = False) -> dict[str
         # [strava-sync] description label, another source (e.g. Garmin) has
         # imported it — yield and clear our state record so we stop claiming
         # ownership of this day.
-        existing_is_strava = bool(existing_state and existing and existing.description.startswith("[strava-sync]"))
+        existing_is_strava = bool(
+            existing_state and existing and existing.description.startswith("[strava-sync]")
+        )
         if existing_state and existing and not existing.description.startswith("[strava-sync]"):
             # Garmin (or another source) has taken over; yield and forget.
             state["days"].pop(date_key, None)
