@@ -46,7 +46,13 @@ def find_today_activity(
             continue
         try:
             dt = datetime.fromisoformat(start)
-            if dt >= cutoff:
+            if dt.tzinfo is None:
+                if "T" not in start:
+                    if dt.date().isoformat() == target_date:
+                        return act
+                    continue
+                dt = dt.replace(tzinfo=timezone.utc)
+            if dt.date().isoformat() == target_date or dt >= cutoff:
                 return act
         except Exception as exc:
             log_warning(f"Failed to parse activity start time: {start}", exc=exc)
