@@ -106,6 +106,8 @@ class GarminSyncService:
         target_date = target_date or date.today()
         date_str = target_date.isoformat()
         load = build_training_load(get_training_load_manager().calculator, date_str)
+        recent_activity_payloads = self.database.list_recent_activities(self.user_id, limit=7)
+        recent_health_payloads = self.database.list_recent_daily_health(self.user_id, limit=7)
         metrics = HealthMetrics(
             metric_date=target_date,
             sleep=self.adapter.get_sleep_data(date_str),
@@ -117,8 +119,21 @@ class GarminSyncService:
             body_composition=self.adapter.get_body_composition(date_str),
             training_readiness=self.adapter.get_training_readiness(date_str),
             training_load=load,
+            recent_activities=[
+                self._activity_from_payload(payload) for payload in recent_activity_payloads
+            ],
+            recent_sleep_scores=[
+                value
+                for value in (
+                    self._sleep_score_from_payload(payload) for payload in recent_health_payloads
+                )
+                if value is not None
+            ],
         )
-        metrics.readiness = self.readiness.calculate(metrics)
+        available_days = len(metrics.recent_sleep_scores) + (
+            1 if metrics.sleep_score is not None else 0
+        )
+        metrics.readiness = self.readiness.calculate(metrics, available_days=available_days)
         self.database.save_daily_health(self.user_id, date_str, metrics.to_dict())
         self.database.save_training_load(self.user_id, date_str, metrics.training_load.__dict__)
         self.database.save_readiness(
@@ -132,3 +147,34 @@ class GarminSyncService:
         )
         self.last_dispatch_reports = [report]
         return metrics
+
+    @staticmethod
+    def _activity_from_payload(payload: dict[str, Any]) -> ActivitySummary:
+        return ActivitySummary(
+            activity_id=payload.get("activity_id"),
+            type=payload.get("type"),
+            sport_type=payload.get("sport_type"),
+            start_time=payload.get("start_time"),
+            distance_km=payload.get("distance_km"),
+            duration_min=payload.get("duration_min"),
+            avg_pace=payload.get("avg_pace"),
+            avg_hr=payload.get("avg_hr"),
+            max_hr=payload.get("max_hr"),
+            calories=payload.get("calories"),
+            training_effect=payload.get("training_effect"),
+            training_effect_aerobic=payload.get("training_effect_aerobic"),
+            training_effect_anaerobic=payload.get("training_effect_anaerobic"),
+            hr_zones=payload.get("hr_zones") or {},
+            avg_power=payload.get("avg_power"),
+            max_power=payload.get("max_power"),
+            tss=payload.get("tss"),
+            raw=payload.get("raw") or {},
+        )
+
+    @staticmethod
+    def _sleep_score_from_payload(payload: dict[str, Any]) -> int | None:
+        sleep = payload.get("sleep")
+        if isinstance(sleep, dict):
+            value = sleep.get("sleepScore") or sleep.get("overallSleepScore")
+            return int(value) if isinstance(value, (int, float)) else None
+        return None

@@ -12,6 +12,7 @@ from typing import Any, Protocol
 
 from garmin_coach.interfaces.telegram.adapter import TelegramAdapter
 from garmin_coach.interfaces.telegram import keyboards, renderer
+from garmin_coach.ports import InputAbortReason, InputAborted, Option
 
 logger = logging.getLogger(__name__)
 
@@ -36,24 +37,24 @@ class FlowRegistry(Protocol):
     @property
     def injury_report(self) -> Any: ...
     @property
-    def onboarding(self) -> Any: ...  # S3
+    def onboarding(self) -> Any: ...
     @property
-    def settings(self) -> Any: ...  # S3
+    def settings(self) -> Any: ...
     @property
-    def goals(self) -> Any: ...  # S3
+    def goals(self) -> Any: ...
 
 
 class EngineProxy(Protocol):
     """Proxy to S1 engine for direct queries."""
 
-    async def generate_weekly_plan(self, user_id: str) -> dict[str, Any]: ...
+    async def generate_weekly_plan(self, user_id: str) -> Any: ...
     async def answer_question(self, user_id: str, question: str) -> str: ...
 
 
 class ReportGenerator(Protocol):
     """S5 report generation."""
 
-    async def generate_weekly(self, user_id: str) -> dict[str, Any]: ...
+    async def generate_weekly(self, user_id: str) -> Any: ...
 
 
 class FeedbackCollector(Protocol):
@@ -100,6 +101,11 @@ class TelegramHandlers:
         self.photo_router = photo_router
         self.user_registry = user_registry
 
+    async def _run_locked(self, user_id: str, action: Any) -> None:
+        lock = self.adapter.get_user_lock(user_id)
+        async with lock:
+            await action()
+
     def register(self, app: Any) -> None:
         """Register all handlers on the telegram Application."""
         _, telegram_ext = _load_telegram()
@@ -144,9 +150,10 @@ class TelegramHandlers:
         scheduler = None
         if ctx and hasattr(ctx, "application") and ctx.application:
             scheduler = ctx.application.bot_data.get("stream2_scheduler")
-        if self.flows and self.flows.onboarding:
+        flows = self.flows
+        if flows and flows.onboarding:
             try:
-                await self.flows.onboarding.execute(user_id)
+                await self._run_locked(user_id, lambda: flows.onboarding.execute(user_id))
             except Exception:
                 logger.exception("/start failed for user %s", user_id)
                 await update.message.reply_text(
@@ -163,9 +170,10 @@ class TelegramHandlers:
     async def _cmd_today(self, update: Any, ctx: Any) -> None:
         """Handle /today — show today's readiness + plan."""
         user_id = await self._user_id(update)
-        if self.flows and self.flows.morning_briefing:
+        flows = self.flows
+        if flows and flows.morning_briefing:
             try:
-                await self.flows.morning_briefing.execute(user_id)
+                await self._run_locked(user_id, lambda: flows.morning_briefing.execute(user_id))
             except Exception:
                 logger.exception("/today failed for user %s", user_id)
                 await update.message.reply_text("⚠️ 오늘의 브리핑을 불러오지 못했습니다.")
@@ -175,11 +183,16 @@ class TelegramHandlers:
     async def _cmd_week(self, update: Any, ctx: Any) -> None:
         """Handle /week — show weekly plan."""
         user_id = await self._user_id(update)
-        if self.engine:
+        engine = self.engine
+        if engine:
             try:
-                plan = await self.engine.generate_weekly_plan(user_id)
-                text = renderer.render_weekly_plan(plan)
-                await self.adapter.send_message(user_id, text)
+
+                async def run_week() -> None:
+                    plan = await engine.generate_weekly_plan(user_id)
+                    text = renderer.render_weekly_plan(plan)
+                    await self.adapter.send_message(user_id, text)
+
+                await self._run_locked(user_id, run_week)
             except Exception:
                 logger.exception("/week failed for user %s", user_id)
                 await update.message.reply_text("⚠️ 주간 계획을 불러오지 못했습니다.")
@@ -189,11 +202,16 @@ class TelegramHandlers:
     async def _cmd_report(self, update: Any, ctx: Any) -> None:
         """Handle /report — generate weekly report."""
         user_id = await self._user_id(update)
-        if self.reports:
+        reports = self.reports
+        if reports:
             try:
-                report_data = await self.reports.generate_weekly(user_id)
-                for msg in renderer.render_weekly_report(report_data):
-                    await self.adapter.send_message(user_id, msg)
+
+                async def run_report() -> None:
+                    report_data = await reports.generate_weekly(user_id)
+                    for msg in renderer.render_weekly_report(report_data):
+                        await self.adapter.send_message(user_id, msg)
+
+                await self._run_locked(user_id, run_report)
             except Exception:
                 logger.exception("/report failed for user %s", user_id)
                 await update.message.reply_text("⚠️ 리포트 생성에 실패했습니다.")
@@ -203,9 +221,10 @@ class TelegramHandlers:
     async def _cmd_feedback(self, update: Any, ctx: Any) -> None:
         """Handle /feedback — manual feedback entry."""
         user_id = await self._user_id(update)
-        if self.feedback:
+        feedback = self.feedback
+        if feedback:
             try:
-                await self.feedback.collect_manual(user_id)
+                await self._run_locked(user_id, lambda: feedback.collect_manual(user_id))
             except Exception:
                 logger.exception("/feedback failed for user %s", user_id)
                 await update.message.reply_text("⚠️ 피드백 입력에 실패했습니다.")
@@ -215,9 +234,12 @@ class TelegramHandlers:
     async def _cmd_nutrition(self, update: Any, ctx: Any) -> None:
         """Handle /nutrition — today's nutrition guide."""
         user_id = await self._user_id(update)
-        if self.flows and self.flows.nutrition_log:
+        flows = self.flows
+        if flows and flows.nutrition_log:
             try:
-                await self.flows.nutrition_log.execute_daily_guide(user_id)
+                await self._run_locked(
+                    user_id, lambda: flows.nutrition_log.execute_daily_guide(user_id)
+                )
             except Exception:
                 logger.exception("/nutrition failed for user %s", user_id)
                 await update.message.reply_text("⚠️ 영양 가이드를 불러오지 못했습니다.")
@@ -227,9 +249,10 @@ class TelegramHandlers:
     async def _cmd_settings(self, update: Any, ctx: Any) -> None:
         """Handle /settings — modify profile/settings."""
         user_id = await self._user_id(update)
-        if self.flows and self.flows.settings:
+        flows = self.flows
+        if flows and flows.settings:
             try:
-                await self.flows.settings.execute(user_id)
+                await self._run_locked(user_id, lambda: flows.settings.execute(user_id))
             except Exception:
                 logger.exception("/settings failed for user %s", user_id)
                 await update.message.reply_text("⚠️ 설정 변경에 실패했습니다.")
@@ -239,9 +262,10 @@ class TelegramHandlers:
     async def _cmd_goals(self, update: Any, ctx: Any) -> None:
         """Handle /goals — view/edit goals."""
         user_id = await self._user_id(update)
-        if self.flows and self.flows.goals:
+        flows = self.flows
+        if flows and flows.goals:
             try:
-                await self.flows.goals.execute(user_id)
+                await self._run_locked(user_id, lambda: flows.goals.execute(user_id))
             except Exception:
                 logger.exception("/goals failed for user %s", user_id)
                 await update.message.reply_text("⚠️ 목표 설정에 실패했습니다.")
@@ -251,9 +275,10 @@ class TelegramHandlers:
     async def _cmd_injury(self, update: Any, ctx: Any) -> None:
         """Handle /injury — report injury/pain."""
         user_id = await self._user_id(update)
-        if self.flows and self.flows.injury_report:
+        flows = self.flows
+        if flows and flows.injury_report:
             try:
-                await self.flows.injury_report.execute(user_id)
+                await self._run_locked(user_id, lambda: flows.injury_report.execute(user_id))
             except Exception:
                 logger.exception("/injury failed for user %s", user_id)
                 await update.message.reply_text("⚠️ 부상 보고에 실패했습니다.")
@@ -274,21 +299,30 @@ class TelegramHandlers:
         user_id = await self._user_id(update)
         raw_data = query.data or ""
         data = self.adapter.resolve_callback(raw_data)
+        flows = self.flows
 
         # Route to appropriate flow based on prefix
         if data.startswith("morning:"):
-            if self.flows and self.flows.morning_briefing:
-                await self.flows.morning_briefing.handle_response(user_id, data)
+            if flows and flows.morning_briefing:
+                await self._run_locked(
+                    user_id, lambda: flows.morning_briefing.handle_response(user_id, data)
+                )
             return
 
         if data.startswith("evening:"):
-            if data == "evening:log_meal" and self.flows and self.flows.nutrition_log:
-                await self.flows.nutrition_log.execute(user_id)
+            if data == "evening:log_meal" and flows and flows.nutrition_log:
+                await self._run_locked(user_id, lambda: flows.nutrition_log.execute(user_id))
             return
 
         if data.startswith("postworkout:"):
-            if data == "postworkout:log_food" and self.flows and self.flows.nutrition_log:
-                await self.flows.nutrition_log.execute(user_id)
+            if data == "postworkout:ate":
+                await self.adapter.send_message(user_id, "좋아요! 회복 영양까지 챙기셨네요 👏")
+                return
+            if data == "postworkout:later":
+                await self.adapter.send_message(user_id, "알겠어요. 30분 안에는 꼭 보충해보세요 ⏰")
+                return
+            if data == "postworkout:log_food" and flows and flows.nutrition_log:
+                await self._run_locked(user_id, lambda: flows.nutrition_log.execute(user_id))
             return
 
         if data.startswith("photo_type:"):
@@ -312,6 +346,12 @@ class TelegramHandlers:
         if self.adapter.deliver_input(user_id, photo_data):
             return
 
+        await self._run_locked(
+            user_id,
+            lambda: self._route_unsolicited_photo(user_id, photo_data, update),
+        )
+
+    async def _route_unsolicited_photo(self, user_id: str, photo_data: bytes, update: Any) -> None:
         # Auto-detect photo type
         photo_type = None
         if self.photo_router:
@@ -325,19 +365,29 @@ class TelegramHandlers:
         elif photo_type == "food":
             await self._handle_food_photo(user_id, photo_data, update)
         else:
-            # Ask user to classify
-            await update.message.reply_text(
-                "📸 사진을 받았어요! 어떤 종류인가요?",
-                reply_markup=keyboards.photo_type_selector(),
-            )
-            # Wait for classification
-            classification = await self.adapter._wait_for_input(user_id)
-            if classification == "photo_type:workout":
-                await self._handle_workout_photo(user_id, photo_data, update)
-            elif classification == "photo_type:food":
-                await self._handle_food_photo(user_id, photo_data, update)
-            else:
-                await update.message.reply_text("📸 사진이 저장되었습니다.")
+            try:
+                classification = await self.adapter.request_select(
+                    user_id,
+                    "📸 사진을 받았어요! 어떤 종류인가요?",
+                    [
+                        Option("📊 운동 캡쳐", "photo_type:workout"),
+                        Option("🍽️ 식단 사진", "photo_type:food"),
+                        Option("📸 기타", "photo_type:other"),
+                    ],
+                )
+                if classification == "photo_type:workout":
+                    await self._handle_workout_photo(user_id, photo_data, update)
+                elif classification == "photo_type:food":
+                    await self._handle_food_photo(user_id, photo_data, update)
+                else:
+                    await self.adapter.send_message(user_id, "📸 사진 분류를 건너뛰었어요.")
+            except InputAborted as exc:
+                if exc.reason == InputAbortReason.TIMEOUT:
+                    await self.adapter.send_message(
+                        user_id, "⏱️ 사진 분류 입력 시간이 초과되어 취소했어요."
+                    )
+                else:
+                    await self.adapter.send_message(user_id, "⏹️ 사진 분류를 취소했어요.")
 
     async def _handle_workout_photo(self, user_id: str, photo: bytes, update: Any) -> None:
         if self.photo_router:
@@ -377,10 +427,15 @@ class TelegramHandlers:
             return
 
         # Otherwise, treat as natural language query to engine
-        if self.engine:
+        engine = self.engine
+        if engine:
             try:
-                answer = await self.engine.answer_question(user_id, text)
-                await self.adapter.send_message(user_id, answer)
+
+                async def run_answer() -> None:
+                    answer = await engine.answer_question(user_id, text)
+                    await self.adapter.send_message(user_id, answer)
+
+                await self._run_locked(user_id, run_answer)
             except Exception:
                 logger.exception("Engine query failed for user %s", user_id)
                 await update.message.reply_text("⚠️ 답변을 생성하지 못했습니다. 다시 시도해주세요.")

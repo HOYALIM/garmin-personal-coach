@@ -9,7 +9,13 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, Protocol
 
-from garmin_coach.ports import Button, CoachingPort, Option
+from garmin_coach.ports import (
+    Button,
+    CoachingPort,
+    InputAbortReason,
+    InputAborted,
+    Option,
+)
 
 if TYPE_CHECKING:
     pass
@@ -20,7 +26,7 @@ logger = logging.getLogger(__name__)
 class WorkoutAnalyzer(Protocol):
     """Provided by S5 — workout auto-analysis."""
 
-    async def analyze(self, user_id: str, activity: dict[str, Any]) -> dict[str, Any]: ...
+    async def analyze(self, user_id: str, activity: Any) -> Any: ...
 
 
 class RecoveryFuelProvider(Protocol):
@@ -60,17 +66,16 @@ class PostWorkoutFlow:
         self.recovery_fuel = recovery_fuel
         self.feedback_agg = feedback_agg
 
-    async def execute(self, user_id: str, activity: dict[str, Any] | Any) -> None:
+    async def execute(self, user_id: str, activity: Any) -> None:
         """Run the full post-workout flow."""
-        activity = self._normalize_activity(activity)
-        activity_id = activity.get("activity_id", "unknown")
+        activity_id = self._value(activity, "activity_id", "unknown")
 
         # 1. Auto-analysis
         try:
             analysis = await self.analyzer.analyze(user_id, activity)
         except Exception:
             logger.exception("Workout analysis failed for user %s", user_id)
-            analysis = {}
+            analysis = None
 
         # 2. Recovery nutrition
         nutrition_text = ""
@@ -103,80 +108,105 @@ class PostWorkoutFlow:
             except Exception:
                 logger.exception("Failed to save feedback for user %s", user_id)
 
-    async def _collect_feedback(self, user_id: str, activity: dict[str, Any]) -> dict[str, Any]:
+    async def _collect_feedback(self, user_id: str, activity: Any) -> dict[str, Any]:
         """Collect RPE, feeling, and conditional questions."""
         feedback: dict[str, Any] = {}
-
-        # RPE
-        rpe = await self.port.request_select(
-            user_id,
-            "📋 체감 강도 (RPE):",
-            [
-                Option("1-2 매우 쉬움", "1-2"),
-                Option("3-4 쉬움", "3-4"),
-                Option("5-6 보통", "5-6"),
-                Option("7-8 힘듦", "7-8"),
-                Option("9-10 극한", "9-10"),
-            ],
-        )
-        feedback["rpe"] = rpe
-
-        # Feeling
-        feeling = await self.port.request_select(
-            user_id,
-            "전체적인 느낌:",
-            [
-                Option("좋았어요", "good", "😀"),
-                Option("보통", "neutral", "😐"),
-                Option("힘들었어요", "bad", "😫"),
-                Option("어딘가 아파요", "pain", "🤕"),
-            ],
-        )
-        feedback["feeling"] = feeling
-
-        # Pain follow-up
-        if feeling == "pain":
-            feedback["pain_detail"] = await self._collect_pain_detail(user_id)
-
-        # Conditional: interval/tempo completion
-        activity_type = activity.get("type", "").lower()
+        answered_keys: list[str] = []
+        pending_keys = ["rpe", "feeling", "note"]
+        activity_type = str(self._value(activity, "type", "")).lower()
         if activity_type in ("interval", "tempo"):
-            completion = await self.port.request_select(
-                user_id,
-                "목표 세트를 모두 완료했나요?",
-                [
-                    Option("전부 완료", "full"),
-                    Option("일부만", "partial"),
-                    Option("못 했어요", "none"),
-                ],
-            )
-            feedback["completion"] = completion
-
-        # Conditional: long session (>90 min) nutrition
-        duration = activity.get("duration_min", 0) or 0
+            pending_keys.append("completion")
+        duration = self._value(activity, "duration_min", 0) or 0
         if duration > 90:
-            nutrition_ok = await self.port.request_select(
+            pending_keys.append("during_nutrition")
+        try:
+            rpe = await self.port.request_select(
                 user_id,
-                "운동 중 보급은 잘 했나요?",
+                "📋 체감 강도 (RPE):",
                 [
-                    Option("잘 했어요", "good"),
-                    Option("부족했어요", "insufficient"),
-                    Option("위장 문제 있었어요", "gi_issue"),
+                    Option("1-2 매우 쉬움", "1-2"),
+                    Option("3-4 쉬움", "3-4"),
+                    Option("5-6 보통", "5-6"),
+                    Option("7-8 힘듦", "7-8"),
+                    Option("9-10 극한", "9-10"),
                 ],
             )
-            feedback["during_nutrition"] = nutrition_ok
+            feedback["rpe"] = rpe
+            answered_keys.append("rpe")
+            pending_keys = [key for key in pending_keys if key != "rpe"]
 
-        # Optional free text
-        await self.port.send_message(
-            user_id,
-            "💬 추가로 남기고 싶은 메모가 있으면 입력해주세요. (없으면 '없음')",
-        )
-        note = await self.port.request_text(user_id, "")
-        if note and note.strip().lower() not in ("없음", "no", "skip", ""):
-            feedback["note"] = note
+            feeling = await self.port.request_select(
+                user_id,
+                "전체적인 느낌:",
+                [
+                    Option("좋았어요", "good", "😀"),
+                    Option("보통", "neutral", "😐"),
+                    Option("힘들었어요", "bad", "😫"),
+                    Option("어딘가 아파요", "pain", "🤕"),
+                ],
+            )
+            feedback["feeling"] = feeling
+            answered_keys.append("feeling")
+            pending_keys = [key for key in pending_keys if key != "feeling"]
 
-        await self.port.send_message(user_id, "✅ 피드백 저장 완료! 수고하셨어요 💪")
-        return feedback
+            if feeling == "pain":
+                feedback["pain_detail"] = await self._collect_pain_detail(user_id)
+                answered_keys.append("pain_detail")
+
+            if activity_type in ("interval", "tempo"):
+                completion = await self.port.request_select(
+                    user_id,
+                    "목표 세트를 모두 완료했나요?",
+                    [
+                        Option("전부 완료", "full"),
+                        Option("일부만", "partial"),
+                        Option("못 했어요", "none"),
+                    ],
+                )
+                feedback["completion"] = completion
+                answered_keys.append("completion")
+                pending_keys = [key for key in pending_keys if key != "completion"]
+
+            if duration > 90:
+                nutrition_ok = await self.port.request_select(
+                    user_id,
+                    "운동 중 보급은 잘 했나요?",
+                    [
+                        Option("잘 했어요", "good"),
+                        Option("부족했어요", "insufficient"),
+                        Option("위장 문제 있었어요", "gi_issue"),
+                    ],
+                )
+                feedback["during_nutrition"] = nutrition_ok
+                answered_keys.append("during_nutrition")
+                pending_keys = [key for key in pending_keys if key != "during_nutrition"]
+
+            await self.port.send_message(
+                user_id,
+                "💬 추가로 남기고 싶은 메모가 있으면 입력해주세요. (없으면 '없음')",
+            )
+            note = await self.port.request_text(user_id, "")
+            answered_keys.append("note")
+            pending_keys = [key for key in pending_keys if key != "note"]
+            if note and note.strip().lower() not in ("없음", "no", "skip", ""):
+                feedback["note"] = note
+
+            feedback["answered_keys"] = answered_keys
+            feedback["pending_keys"] = pending_keys
+            feedback["collection_status"] = "complete"
+            await self.port.send_message(user_id, "✅ 피드백 저장 완료! 수고하셨어요 💪")
+            return feedback
+        except InputAborted as exc:
+            feedback["answered_keys"] = answered_keys
+            feedback["pending_keys"] = pending_keys
+            feedback["collection_status"] = exc.reason.value
+            if exc.reason == InputAbortReason.TIMEOUT:
+                await self.port.send_message(
+                    user_id, "⏱️ 피드백 입력 시간이 초과되어 저장을 취소했어요."
+                )
+            else:
+                await self.port.send_message(user_id, "⏹️ 피드백 입력을 취소했어요.")
+            return feedback
 
     async def _collect_pain_detail(self, user_id: str) -> dict[str, Any]:
         body_part = await self.port.request_select(
@@ -209,11 +239,11 @@ class PostWorkoutFlow:
 
         return {"body_part": body_part, "severity": severity}
 
-    def _format_analysis(self, activity: dict[str, Any], analysis: dict[str, Any]) -> str:
-        act_type = activity.get("type", "운동")
-        distance = activity.get("distance_km")
-        duration = activity.get("duration_min")
-        avg_hr = activity.get("avg_hr")
+    def _format_analysis(self, activity: Any, analysis: Any) -> str:
+        act_type = self._value(activity, "type", "운동")
+        distance = self._value(activity, "distance_km")
+        duration = self._value(activity, "duration_min")
+        avg_hr = self._value(activity, "avg_hr")
 
         lines = [f"🏃‍♂️ {act_type} 완료! 수고했어요.\n"]
         lines.append("📊 세션 분석:")
@@ -230,39 +260,42 @@ class PostWorkoutFlow:
             lines.append("- " + " | ".join(parts))
 
         # Analysis details from S5
-        tss = analysis.get("tss")
+        tss = self._value(analysis, "tss")
+        if tss is None:
+            tss = self._value(activity, "tss")
         if tss:
             lines.append(f"- TSS: {tss}")
-        te_aer = analysis.get("training_effect_aerobic")
-        te_ana = analysis.get("training_effect_anaerobic")
+        te_aer = self._value(analysis, "training_effect_aerobic") or self._value(
+            activity, "training_effect_aerobic"
+        )
+        te_ana = self._value(analysis, "training_effect_anaerobic") or self._value(
+            activity, "training_effect_anaerobic"
+        )
         if te_aer or te_ana:
             lines.append(f"- Training Effect: 유산소 {te_aer or '?'} / 무산소 {te_ana or '?'}")
 
-        coaching_notes = analysis.get("coaching_notes", "")
+        coaching_notes = self._value(analysis, "coaching_notes", "")
         if coaching_notes:
             lines.append(f"\n💬 {coaching_notes}")
 
         return "\n".join(lines)
 
-    def _format_nutrition(self, nutrition: dict[str, Any]) -> str:
+    def _format_nutrition(self, nutrition: Any) -> str:
         lines = ["\n\n🍽️ 회복 영양 권장:"]
-        timing = nutrition.get("timing", "지금부터 30분 이내")
+        timing = self._value(nutrition, "timing", "지금부터 30분 이내")
         lines.append(f"{timing}에 아래 중 하나를 섭취하세요:")
-        examples = nutrition.get("examples", [])
+        examples = self._value(nutrition, "examples", [])
         for ex in examples[:4]:
             lines.append(f"- {ex}")
-        rationale = nutrition.get("rationale")
+        rationale = self._value(nutrition, "rationale")
         if rationale:
             lines.append(f"\n> {rationale}")
         return "\n".join(lines)
 
-    def _normalize_activity(self, activity: dict[str, Any] | Any) -> dict[str, Any]:
-        if isinstance(activity, dict):
-            return activity
-        if hasattr(activity, "to_dict"):
-            result = activity.to_dict()
-            if isinstance(result, dict):
-                return result
-        if hasattr(activity, "__dict__"):
-            return {key: value for key, value in vars(activity).items() if not key.startswith("_")}
-        return {}
+    def _value(self, obj: Any, key: str, default: Any = None) -> Any:
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        value = getattr(obj, key, default)
+        if key == "coaching_notes" and isinstance(value, list):
+            return " / ".join(str(item) for item in value)
+        return value

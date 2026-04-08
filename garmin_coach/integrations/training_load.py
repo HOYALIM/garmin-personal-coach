@@ -39,8 +39,16 @@ def calculate_weekly_volume_km(
     sessions = calculator.get_sessions_in_range(start_date, end_date)
     total = 0.0
     for session in sessions:
+        distance_km = getattr(session, "distance_km", None)
+        distance_meters = getattr(session, "distance_meters", None)
+        if isinstance(distance_km, (int, float)):
+            total += max(float(distance_km), 0.0)
+            continue
+        if isinstance(distance_meters, (int, float)):
+            total += max(float(distance_meters) / 1000.0, 0.0)
+            continue
         duration_min = getattr(session, "duration_min", None)
-        if duration_min:
+        if duration_min and getattr(session, "sport", None) == "running":
             total += max(float(duration_min) / 6.0, 0.0)
     return round(total, 1)
 

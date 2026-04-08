@@ -6,24 +6,31 @@ Channel-agnostic: uses CoachingPort only.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from typing import Any, Protocol
 
-from garmin_coach.ports import CoachingPort, Option
+from garmin_coach.ports import CoachingPort, InputAbortReason, InputAborted, Option
 
 logger = logging.getLogger(__name__)
 
 
 class FoodPhotoAnalyzer(Protocol):
     """Provided by S4 — food photo analysis via Vision LLM."""
+
     async def analyze(self, user_id: str, photo: bytes) -> dict[str, Any]: ...
+
 
 class NutritionStorage(Protocol):
     """Provided by S1 storage — save nutrition log entries."""
+
     async def save_meal(self, user_id: str, meal: dict[str, Any]) -> None: ...
+
 
 class DailyNutritionProvider(Protocol):
     """Provided by S4 — today's nutrition guide."""
+
     async def get_daily_guide(self, user_id: str) -> dict[str, Any]: ...
 
 
@@ -51,43 +58,51 @@ class NutritionLogFlow:
 
     async def execute(self, user_id: str) -> None:
         """Run the nutrition logging flow."""
-        method = await self.port.request_select(
-            user_id,
-            "📝 식사 기록 방법을 선택하세요:",
-            [
-                Option("📝 텍스트 입력", "text", "📝"),
-                Option("📸 사진 촬영", "photo", "📸"),
-                Option("⏭️ 건너뛰기", "skip", "⏭️"),
-            ],
-        )
+        try:
+            method = await self.port.request_select(
+                user_id,
+                "📝 식사 기록 방법을 선택하세요:",
+                [
+                    Option("📝 텍스트 입력", "text", "📝"),
+                    Option("📸 사진 촬영", "photo", "📸"),
+                    Option("⏭️ 건너뛰기", "skip", "⏭️"),
+                ],
+            )
 
-        if method == "skip":
-            await self.port.send_message(user_id, "⏭️ 건너뛰었습니다.")
-            return
+            if method == "skip":
+                await self.port.send_message(user_id, "⏭️ 건너뛰었습니다.")
+                return
 
-        meal: dict[str, Any] = {}
+            meal: dict[str, Any] = {}
 
-        if method == "text":
-            meal = await self._log_by_text(user_id)
-        elif method == "photo":
-            meal = await self._log_by_photo(user_id)
+            if method == "text":
+                meal = await self._log_by_text(user_id)
+            elif method == "photo":
+                meal = await self._log_by_photo(user_id)
 
-        if meal and self.storage:
-            try:
-                await self.storage.save_meal(user_id, meal)
-                await self.port.send_message(user_id, "✅ 식사 기록이 저장되었습니다!")
-            except Exception:
-                logger.exception("Failed to save meal for user %s", user_id)
-                await self.port.send_message(user_id, "⚠️ 저장 중 오류가 발생했습니다. 다시 시도해주세요.")
-        elif meal:
-            await self.port.send_message(user_id, "✅ 식사 기록 완료!")
+            if meal and self.storage:
+                try:
+                    await self.storage.save_meal(user_id, meal)
+                    await self.port.send_message(user_id, "✅ 식사 기록이 저장되었습니다!")
+                except Exception:
+                    logger.exception("Failed to save meal for user %s", user_id)
+                    await self.port.send_message(
+                        user_id, "⚠️ 저장 중 오류가 발생했습니다. 다시 시도해주세요."
+                    )
+            elif meal:
+                await self.port.send_message(user_id, "✅ 식사 기록 완료!")
+        except InputAborted as exc:
+            if exc.reason == InputAbortReason.TIMEOUT:
+                await self.port.send_message(
+                    user_id, "⏱️ 식사 기록 입력 시간이 초과되어 취소했어요."
+                )
+            else:
+                await self.port.send_message(user_id, "⏹️ 식사 기록을 취소했어요.")
 
     async def execute_daily_guide(self, user_id: str) -> None:
         """Show today's nutrition guide (/nutrition command)."""
         if not self.nutrition_guide:
-            await self.port.send_message(
-                user_id, "🍎 영양 가이드가 아직 설정되지 않았습니다."
-            )
+            await self.port.send_message(user_id, "🍎 영양 가이드가 아직 설정되지 않았습니다.")
             return
         try:
             guide = await self.nutrition_guide.get_daily_guide(user_id)
@@ -101,14 +116,24 @@ class NutritionLogFlow:
             user_id,
             '📝 무엇을 먹었는지 입력해주세요.\n예: "닭가슴살 200g, 밥 한 공기, 샐러드"',
         )
-        return {"type": "text", "description": description}
+        return self._with_entry_id(
+            {
+                "type": "text",
+                "description": description,
+                "authoritative": True,
+                "status": "confirmed",
+            }
+        )
 
     async def _log_by_photo(self, user_id: str) -> dict[str, Any]:
-        photo = await self.port.request_photo(
-            user_id, "📸 식단 사진을 보내주세요."
-        )
-        if not photo:
-            await self.port.send_message(user_id, "사진을 받지 못했습니다.")
+        try:
+            photo = await self.port.request_photo(user_id, "📸 식단 사진을 보내주세요.")
+        except InputAborted as exc:
+            if exc.reason == InputAbortReason.SKIPPED:
+                await self.port.send_message(user_id, "⏭️ 사진 기록을 건너뛰었습니다.")
+                return {}
+            raise
+        if photo is None:
             return {}
 
         # Analyze with Vision LLM
@@ -134,6 +159,7 @@ class NutritionLogFlow:
     ) -> dict[str, Any]:
         macros = analysis.get("estimated_macros", {})
         items = analysis.get("items_detected", [])
+        confidence = str(analysis.get("confidence", "medium")).lower()
 
         lines = ["📊 분석 결과:"]
         if items:
@@ -146,6 +172,10 @@ class NutritionLogFlow:
         note = analysis.get("coaching_note")
         if note:
             lines.append(f"\n💬 {note}")
+        if analysis.get("allergen_warning"):
+            lines.append(f"⚠️ {analysis['allergen_warning']}")
+        if confidence == "low":
+            lines.append("⚠️ 신뢰도가 낮아 추정치로만 저장됩니다. 확인하거나 수정해주세요.")
 
         confirm = await self.port.request_select(
             user_id,
@@ -153,16 +183,52 @@ class NutritionLogFlow:
             [
                 Option("네, 저장", "confirm"),
                 Option("수정할게요", "edit"),
+                Option("취소", "cancel"),
             ],
         )
 
-        if confirm == "edit":
-            description = await self.port.request_text(
-                user_id, "수정할 내용을 입력해주세요:"
-            )
-            return {"type": "photo_edited", "original_analysis": analysis, "edited": description, "has_photo": True}
+        if confirm == "cancel":
+            await self.port.send_message(user_id, "⏹️ 사진 기반 식사 기록을 저장하지 않았어요.")
+            return {}
 
-        return {"type": "photo_analyzed", "analysis": analysis, "has_photo": True}
+        if confirm == "edit":
+            description = await self.port.request_text(user_id, "수정할 내용을 입력해주세요:")
+            return self._with_entry_id(
+                {
+                    "type": "photo_edited",
+                    "original_analysis": analysis,
+                    "edited": description,
+                    "has_photo": True,
+                    "authoritative": True,
+                    "user_confirmed": True,
+                    "status": "confirmed",
+                }
+            )
+
+        return self._with_entry_id(
+            {
+                "type": "photo_analyzed",
+                "analysis": analysis,
+                "has_photo": True,
+                "user_confirmed": True,
+                "requires_confirmation": confidence == "low",
+                "authoritative": confidence in {"medium", "high"},
+                "status": "confirmed",
+            }
+        )
+
+    def _with_entry_id(self, meal: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(meal)
+        payload.setdefault("entry_id", self._build_entry_id(payload))
+        return payload
+
+    def _build_entry_id(self, meal: dict[str, Any]) -> str:
+        canonical = dict(meal)
+        canonical.pop("entry_id", None)
+        encoded = json.dumps(canonical, ensure_ascii=False, sort_keys=True, default=str).encode(
+            "utf-8"
+        )
+        return hashlib.sha256(encoded).hexdigest()[:16]
 
     def _format_guide(self, guide: dict[str, Any]) -> str:
         lines = ["🍎 오늘의 영양 가이드\n"]

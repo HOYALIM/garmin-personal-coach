@@ -34,6 +34,22 @@ class CoachingGuardrails:
         GuardrailAction.OVERRIDE: 2,
         GuardrailAction.BLOCK_AND_ALERT: 3,
     }
+    _lower_body_parts = {
+        "knee",
+        "ankle",
+        "achilles",
+        "hamstring",
+        "calf",
+        "plantar",
+        "foot",
+        "shin",
+        "quad",
+        "quadriceps",
+        "groin",
+        "hip",
+    }
+    _back_parts = {"back", "lower_back", "upper_back", "spine", "waist"}
+    _upper_body_parts = {"shoulder", "arm", "elbow", "wrist", "hand", "neck"}
 
     def validate(
         self, coaching: CoachingResponse, user: UserProfile, current_metrics: HealthMetrics
@@ -277,6 +293,21 @@ class CoachingGuardrails:
                         rule_id="injury-clearance",
                     )
                 )
+            if self._active_injury_conflicts_with_session(coaching, injury.body_part):
+                reason = (
+                    f"활성 부상 부위 '{injury.body_part}'에 부담이 가는 세션이라 자동 차단합니다."
+                )
+                results.append(
+                    GuardrailResult(
+                        GuardrailAction.OVERRIDE,
+                        coaching.text,
+                        self._generate_active_injury_coaching(injury.body_part),
+                        reason,
+                        "critical",
+                        reasons=[reason],
+                        rule_id="injury-active-body-part",
+                    )
+                )
             for restriction in injury.restrictions:
                 if self._coaching_violates_restriction(coaching, restriction):
                     reason = f"부상 제한사항 '{restriction}'을 반영해 세션을 조정합니다."
@@ -311,25 +342,6 @@ class CoachingGuardrails:
     def _check_nutrition_safety(
         self, coaching: CoachingResponse, user: UserProfile
     ) -> GuardrailResult:
-        if user.nutrition and user.nutrition.allergies:
-            for allergen in user.nutrition.allergies:
-                if allergen and allergen.lower() in coaching.text.lower():
-                    text = re.sub(
-                        re.escape(allergen),
-                        "[알레르기 식품 제거]",
-                        coaching.text,
-                        flags=re.IGNORECASE,
-                    )
-                    reason = f"알레르기 식품 '{allergen}'을 제거했습니다."
-                    return GuardrailResult(
-                        GuardrailAction.MODIFY,
-                        coaching.text,
-                        text,
-                        reason,
-                        "warning",
-                        reasons=[reason],
-                        rule_id="nutrition-allergy",
-                    )
         kcal_match = re.search(r"(\d{2,4})\s?kcal", coaching.text.lower())
         if kcal_match and user.weight_kg and user.height_cm:
             recommended = int(kcal_match.group(1))
@@ -353,6 +365,25 @@ class CoachingGuardrails:
                     reasons=[reason],
                     rule_id="nutrition-bmr",
                 )
+        if user.nutrition and user.nutrition.allergies:
+            for allergen in user.nutrition.allergies:
+                if allergen and allergen.lower() in coaching.text.lower():
+                    text = re.sub(
+                        re.escape(allergen),
+                        "[알레르기 식품 제거]",
+                        coaching.text,
+                        flags=re.IGNORECASE,
+                    )
+                    reason = f"알레르기 식품 '{allergen}'을 제거했습니다."
+                    return GuardrailResult(
+                        GuardrailAction.MODIFY,
+                        coaching.text,
+                        text,
+                        reason,
+                        "warning",
+                        reasons=[reason],
+                        rule_id="nutrition-allergy",
+                    )
         if re.search(r"(완치|치료|예방).*(보충제|supplement)", coaching.text.lower()):
             reason = "보충제의 의학적 효능 주장 표현을 제거했습니다."
             return GuardrailResult(
@@ -486,6 +517,78 @@ class CoachingGuardrails:
             return True
         return restriction in text
 
+    def _active_injury_conflicts_with_session(
+        self, coaching: CoachingResponse, body_part: str
+    ) -> bool:
+        part = body_part.lower().strip()
+        text = coaching.text.lower()
+        lower_body_tokens = {
+            "run",
+            "running",
+            "jog",
+            "interval",
+            "tempo",
+            "long",
+            "race",
+            "hill",
+            "sprint",
+            "jump",
+            "러닝",
+            "달리기",
+            "인터벌",
+            "템포",
+            "롱런",
+            "장거리",
+            "질주",
+            "언덕",
+        }
+        back_tokens = lower_body_tokens | {
+            "strength",
+            "lift",
+            "deadlift",
+            "squat",
+            "플랭크",
+            "웨이트",
+        }
+        upper_body_tokens = {
+            "swim",
+            "swimming",
+            "strength",
+            "push",
+            "pull",
+            "press",
+            "row",
+            "수영",
+            "웨이트",
+        }
+        lower_body_session_types = {
+            "easy",
+            "moderate",
+            "hard",
+            "long",
+            "interval",
+            "tempo",
+            "race",
+        }
+        if part in self._lower_body_parts:
+            return coaching.session_type.value in lower_body_session_types or any(
+                token in text for token in lower_body_tokens
+            )
+        if part in self._back_parts:
+            return coaching.session_type.value in lower_body_session_types or any(
+                token in text for token in back_tokens
+            )
+        if part in self._upper_body_parts:
+            return any(token in text for token in upper_body_tokens)
+        return coaching.intensity in {"hard", "interval", "tempo", "race"}
+
     @staticmethod
     def _apply_restriction(coaching: CoachingResponse, restriction: str) -> str:
         return f"제한사항 '{restriction}'을 반영해 충격/고강도 요소를 제거하고 회복 중심으로 조정합니다."
+
+    @staticmethod
+    def _generate_active_injury_coaching(body_part: str) -> str:
+        return (
+            f"현재 {body_part} 활성 부상이 있어 해당 부위에 부담이 가는 세션은 진행하지 않습니다. "
+            "오늘은 휴식 또는 해당 부위 부담이 적은 비충격 회복 운동만 권장합니다."
+        )

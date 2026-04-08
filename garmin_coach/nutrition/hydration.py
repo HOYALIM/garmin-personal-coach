@@ -1,13 +1,28 @@
 import json
 import os
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
+from garmin_coach.models import SessionType
 from garmin_coach.logging_config import log_warning
 
 
 DATA_DIR = os.path.expanduser("~/.config/garmin_coach")
 HYDRATION_FILE = os.path.join(DATA_DIR, "hydration.json")
+
+
+@dataclass(slots=True)
+class HydrationPlan:
+    session_type: str
+    pre: str
+    during: str
+    post: str
+    electrolytes: str
+    sodium_mg_per_liter: tuple[int, int]
+    hot_weather_adjustment_ml_per_hour: int
+    temperature_celsius: float | None
+    rationale: str
 
 
 def ensure_data_dir():
@@ -32,7 +47,7 @@ def save_hydration_data(data: dict):
         json.dump(data, f, indent=2)
 
 
-def log_water(amount_ml: int, timestamp: datetime = None):
+def log_water(amount_ml: int, timestamp: Optional[datetime] = None):
     if timestamp is None:
         timestamp = datetime.now()
     date_key = timestamp.strftime("%Y-%m-%d")
@@ -92,7 +107,7 @@ def check_hydration_status(target_ml: int) -> str:
         return "just_started"
 
 
-def get_hydration_summary(target_ml: int = None) -> dict:
+def get_hydration_summary(target_ml: Optional[int] = None) -> dict:
     today_intake = get_today_intake()
     if target_ml is None:
         target_ml = 2500
@@ -114,3 +129,61 @@ def reset_daily():
     if date_key in data:
         data[date_key] = {"entries": [], "total_ml": 0}
         save_hydration_data(data)
+
+
+def calculate_sweat_rate(
+    pre_weight_kg: float,
+    post_weight_kg: float,
+    fluid_consumed_ml: float,
+    duration_h: float,
+) -> float:
+    if duration_h <= 0:
+        raise ValueError("duration_h must be positive")
+    weight_loss_ml = (pre_weight_kg - post_weight_kg) * 1000
+    return round((weight_loss_ml + fluid_consumed_ml) / duration_h, 1)
+
+
+def _normalize_session_type(session_type: SessionType | str) -> str:
+    if isinstance(session_type, SessionType):
+        return session_type.value
+    return str(session_type).lower()
+
+
+def get_hydration_plan(
+    session_type: SessionType | str,
+    duration_min: int,
+    temp_celsius: float | None = None,
+) -> HydrationPlan:
+    session = _normalize_session_type(session_type)
+    hot_weather = temp_celsius is not None and temp_celsius >= 30
+    long_session = duration_min >= 60
+    extra_ml_hour = 250 if hot_weather else 0
+    during_ml = "15-20분마다 150-250ml"
+    if hot_weather:
+        during_ml = "15-20분마다 250-350ml"
+
+    electrolytes = "선택 사항"
+    sodium = (0, 0)
+    if long_session or hot_weather:
+        electrolytes = "60분 이상 또는 고온 환경이므로 나트륨 보충 권장"
+        sodium = (500, 1000)
+
+    rationale = "기본 수분 계획"
+    if session in {"long", "race"}:
+        rationale = (
+            "장거리/레이스 세션은 탈수와 나트륨 손실 위험이 높아 보수적으로 수분을 잡습니다."
+        )
+    elif hot_weather:
+        rationale = "고온 환경에서는 같은 세션이라도 수분과 전해질 필요량을 상향합니다."
+
+    return HydrationPlan(
+        session_type=session,
+        pre="운동 2-3시간 전 500ml, 직전 200-300ml",
+        during=during_ml,
+        post="체중 손실 1kg당 1.5L",
+        electrolytes=electrolytes,
+        sodium_mg_per_liter=sodium,
+        hot_weather_adjustment_ml_per_hour=extra_ml_hour,
+        temperature_celsius=temp_celsius,
+        rationale=rationale,
+    )

@@ -19,15 +19,27 @@ logger = logging.getLogger(__name__)
 
 class ReadinessProvider(Protocol):
     """Provided by S1 engine — readiness score + health metrics."""
-    async def get_readiness(self, user_id: str) -> dict[str, Any]: ...
+
+    async def get_readiness(self, user_id: str) -> Any: ...
+
 
 class DailyCoachingProvider(Protocol):
     """Provided by S1 engine — daily coaching recommendation."""
-    async def generate_daily_coaching(self, user_id: str, readiness: dict[str, Any]) -> dict[str, Any]: ...
+
+    async def generate_daily_coaching(self, user_id: str, readiness: Any) -> Any: ...
+
 
 class NutritionTimingProvider(Protocol):
     """Provided by S4 — pre-workout nutrition advice."""
-    async def get_pre_workout_advice(self, user_id: str, session_type: str) -> dict[str, Any] | None: ...
+
+    async def get_pre_workout_advice(
+        self, user_id: str, session_type: str
+    ) -> dict[str, Any] | None: ...
+
+
+class MorningPlanState(Protocol):
+    async def change_today_session(self, user_id: str, session_type: str) -> None: ...
+    async def postpone_today(self, user_id: str) -> None: ...
 
 
 class MorningBriefingFlow:
@@ -47,17 +59,20 @@ class MorningBriefingFlow:
         readiness: ReadinessProvider,
         coaching: DailyCoachingProvider,
         nutrition: NutritionTimingProvider | None = None,
+        plan_state: MorningPlanState | None = None,
     ) -> None:
         self.port = port
         self.readiness = readiness
         self.coaching = coaching
         self.nutrition = nutrition
+        self.plan_state = plan_state
 
     async def execute(self, user_id: str) -> None:
         """Run the full morning briefing flow."""
         # 1. Fetch readiness
         try:
             readiness_data = await self.readiness.get_readiness(user_id)
+            readiness_data = self._to_payload(readiness_data)
         except Exception:
             logger.exception("Failed to fetch readiness for user %s", user_id)
             await self.port.send_message(
@@ -70,9 +85,12 @@ class MorningBriefingFlow:
         # 2. Generate daily coaching
         try:
             coaching_data = await self.coaching.generate_daily_coaching(user_id, readiness_data)
+            coaching_data = self._to_payload(coaching_data)
         except Exception:
             logger.exception("Failed to generate coaching for user %s", user_id)
-            coaching_data = {"text": "오늘 계획을 불러오지 못했습니다. /today 로 다시 시도해주세요."}
+            coaching_data = {
+                "text": "오늘 계획을 불러오지 못했습니다. /today 로 다시 시도해주세요."
+            }
 
         # 3. Build briefing message
         message = self._format_briefing(readiness_data, coaching_data)
@@ -81,7 +99,9 @@ class MorningBriefingFlow:
         session_type = coaching_data.get("session_type", "")
         if session_type and session_type.lower() not in ("rest", "off") and self.nutrition:
             try:
-                nutrition_advice = await self.nutrition.get_pre_workout_advice(user_id, session_type)
+                nutrition_advice = await self.nutrition.get_pre_workout_advice(
+                    user_id, session_type
+                )
                 if nutrition_advice:
                     message += self._format_nutrition(nutrition_advice)
             except Exception:
@@ -113,22 +133,24 @@ class MorningBriefingFlow:
                     Option("😴 휴식", "rest", "😴"),
                 ],
             )
+            if self.plan_state:
+                await self.plan_state.change_today_session(user_id, selected)
             await self.port.send_message(
                 user_id,
                 f"✅ 오늘 세션을 '{selected}'으로 변경했습니다.",
             )
 
         elif action == "morning:postpone":
+            if self.plan_state:
+                await self.plan_state.postpone_today(user_id)
             await self.port.send_message(
                 user_id,
                 "⏭️ 오늘은 휴식일로 변경했습니다. 내일 다시 안내드릴게요.",
             )
 
-    def _format_briefing(
-        self, readiness: dict[str, Any], coaching: dict[str, Any]
-    ) -> str:
-        score = readiness.get("score", "?")
-        level = readiness.get("level", "")
+    def _format_briefing(self, readiness: Any, coaching: Any) -> str:
+        score = self._value(readiness, "score", "?")
+        level = self._value(readiness, "level", "")
         level_emoji = {"green": "🟢", "yellow": "🟡", "red": "🔴", "critical": "🚨"}.get(
             level.lower(), "⚪"
         )
@@ -137,7 +159,7 @@ class MorningBriefingFlow:
         lines.append(f"🔋 Readiness Score: {score}/100 {level_emoji}")
 
         # Health component details
-        components = readiness.get("components", {})
+        components = self._value(readiness, "components", {})
         if components:
             if "sleep_score" in components:
                 v = components["sleep_score"]
@@ -157,26 +179,40 @@ class MorningBriefingFlow:
                 lines.append(f"- TSB: {v} {level_emoji}")
 
         # Coaching plan
-        coaching_text = coaching.get("text", "")
-        session = coaching.get("session_type", "")
+        coaching_text = self._value(coaching, "text", "")
+        session = self._value(coaching, "session_type", "")
         if session:
             lines.append(f"\n🏃 오늘 계획: {session}")
         if coaching_text:
             lines.append(f"→ {coaching_text}")
 
         # Guardrail notice
-        guardrail_reason = coaching.get("guardrail_reason")
+        guardrail_reason = self._value(coaching, "guardrail_reason")
         if guardrail_reason:
             lines.append(f"\n⚠️ 코치가 계획을 조정했습니다:\n{guardrail_reason}")
 
         return "\n".join(lines)
 
-    def _format_nutrition(self, advice: dict[str, Any]) -> str:
+    def _format_nutrition(self, advice: Any) -> str:
         lines = ["\n\n🍽️ 운동 전 식사 리마인더:"]
-        desc = advice.get("description", "")
+        desc = self._value(advice, "description", "")
         if desc:
             lines.append(desc)
-        examples = advice.get("examples", [])
+        examples = self._value(advice, "examples", [])
         if examples:
             lines.append(f"(예: {', '.join(examples[:3])})")
         return "\n".join(lines)
+
+    def _to_payload(self, value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if hasattr(value, "to_dict"):
+            result = value.to_dict()
+            if isinstance(result, dict):
+                return result
+        return {}
+
+    def _value(self, obj: Any, key: str, default: Any = None) -> Any:
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)

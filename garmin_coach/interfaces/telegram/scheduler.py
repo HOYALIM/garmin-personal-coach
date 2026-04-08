@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from datetime import time as dt_time
 from typing import Any, Protocol
+from zoneinfo import ZoneInfo
 
 from garmin_coach.interfaces.telegram import renderer
 
@@ -21,8 +22,8 @@ logger = logging.getLogger(__name__)
 # Default schedule times
 DEFAULT_MORNING_TIME = dt_time(7, 0)
 DEFAULT_EVENING_TIME = dt_time(21, 0)
-DEFAULT_WEEKLY_TIME = dt_time(20, 0)  # Sunday
-DEFAULT_MONTHLY_TIME = dt_time(9, 0)  # 1st of month
+DEFAULT_WEEKLY_TIME = dt_time(20, 0, tzinfo=ZoneInfo("Asia/Seoul"))  # Sunday
+DEFAULT_MONTHLY_TIME = dt_time(9, 0, tzinfo=ZoneInfo("Asia/Seoul"))  # 1st of month
 
 
 class UserConfigProvider(Protocol):
@@ -33,12 +34,16 @@ class UserConfigProvider(Protocol):
 
 
 class ReportGenerator(Protocol):
-    async def generate_weekly(self, user_id: str) -> dict[str, Any]: ...
-    async def generate_monthly(self, user_id: str) -> dict[str, Any]: ...
+    async def generate_weekly(self, user_id: str) -> Any: ...
+    async def generate_monthly(self, user_id: str) -> Any: ...
 
 
 class MessageDeliveryPort(Protocol):
     async def send_message(self, user_id: str, text: str) -> None: ...
+
+
+class UserLockProvider(Protocol):
+    def get_user_lock(self, user_id: str) -> Any: ...
 
 
 class TelegramScheduler:
@@ -53,11 +58,13 @@ class TelegramScheduler:
         user_config: UserConfigProvider | None = None,
         delivery: MessageDeliveryPort | None = None,
         reports: ReportGenerator | None = None,
+        locker: UserLockProvider | None = None,
     ) -> None:
         self.flows = flows
         self.user_config = user_config
         self.delivery = delivery
         self.reports = reports
+        self.locker = locker
         self._job_queue: Any = None
 
     def setup(self, job_queue: Any) -> None:
@@ -66,33 +73,6 @@ class TelegramScheduler:
         Call this after Application is built.
         """
         self._job_queue = job_queue
-
-        # Schedule daily jobs at default times
-        # These will be refined per-user when user configs are loaded
-        job_queue.run_daily(
-            self._morning_briefing_job,
-            time=DEFAULT_MORNING_TIME,
-            name="morning_briefing",
-        )
-        job_queue.run_daily(
-            self._evening_checkin_job,
-            time=DEFAULT_EVENING_TIME,
-            name="evening_checkin",
-        )
-        # Weekly report: Sunday at 20:00
-        job_queue.run_daily(
-            self._weekly_report_job,
-            time=DEFAULT_WEEKLY_TIME,
-            days=(6,),  # Sunday = 6
-            name="weekly_report",
-        )
-        # Monthly report: 1st of month at 09:00
-        job_queue.run_monthly(
-            self._monthly_report_job,
-            when=DEFAULT_MONTHLY_TIME,
-            day=1,
-            name="monthly_report",
-        )
 
         logger.info("TelegramScheduler: default jobs scheduled")
 
@@ -107,8 +87,12 @@ class TelegramScheduler:
             logger.debug("No schedule config for user %s, using defaults", user_id)
             return
 
-        morning_time = _parse_time(config.get("morning_time"), DEFAULT_MORNING_TIME)
-        evening_time = _parse_time(config.get("evening_time"), DEFAULT_EVENING_TIME)
+        timezone = str(config.get("timezone") or "Asia/Seoul")
+        morning_time = _parse_time(config.get("morning_time"), DEFAULT_MORNING_TIME, timezone)
+        evening_time = _parse_time(config.get("evening_time"), DEFAULT_EVENING_TIME, timezone)
+        weekly_time = _parse_time(config.get("weekly_time"), DEFAULT_WEEKLY_TIME, timezone)
+        monthly_time = _parse_time(config.get("monthly_time"), DEFAULT_MONTHLY_TIME, timezone)
+        weekly_day = _parse_weekday(config.get("weekly_day"))
 
         # Remove existing per-user jobs
         self._remove_user_jobs(user_id)
@@ -129,6 +113,22 @@ class TelegramScheduler:
             data={"user_id": user_id},
         )
 
+        self._job_queue.run_daily(
+            self._weekly_report_job,
+            time=weekly_time,
+            days=(weekly_day,),
+            name=f"weekly_{user_id}",
+            data={"user_id": user_id},
+        )
+
+        self._job_queue.run_monthly(
+            self._monthly_report_job,
+            when=monthly_time,
+            day=1,
+            name=f"monthly_{user_id}",
+            data={"user_id": user_id},
+        )
+
         logger.info(
             "Scheduled for user %s: morning=%s, evening=%s",
             user_id,
@@ -140,7 +140,12 @@ class TelegramScheduler:
         """Remove existing scheduled jobs for a user."""
         if not self._job_queue:
             return
-        for name in [f"morning_{user_id}", f"evening_{user_id}"]:
+        for name in [
+            f"morning_{user_id}",
+            f"evening_{user_id}",
+            f"weekly_{user_id}",
+            f"monthly_{user_id}",
+        ]:
             jobs = self._job_queue.get_jobs_by_name(name)
             for job in jobs:
                 job.schedule_removal()
@@ -153,7 +158,9 @@ class TelegramScheduler:
         for user_id in user_ids:
             try:
                 if self.flows and self.flows.morning_briefing:
-                    await self.flows.morning_briefing.execute(user_id)
+                    await self._run_locked(
+                        user_id, lambda: self.flows.morning_briefing.execute(user_id)
+                    )
             except Exception:
                 logger.exception("Morning briefing failed for user %s", user_id)
 
@@ -163,25 +170,31 @@ class TelegramScheduler:
         for user_id in user_ids:
             try:
                 if self.flows and self.flows.evening_checkin:
-                    await self.flows.evening_checkin.execute(user_id)
+                    await self._run_locked(
+                        user_id, lambda: self.flows.evening_checkin.execute(user_id)
+                    )
             except Exception:
                 logger.exception("Evening check-in failed for user %s", user_id)
 
     async def _weekly_report_job(self, context: Any) -> None:
         """Execute weekly report for all users."""
-        user_ids = await self._get_all_users()
+        user_ids = await self._get_target_users(context)
         for user_id in user_ids:
             try:
-                await self._deliver_report(user_id, period="weekly")
+                await self._run_locked(
+                    user_id, lambda: self._deliver_report(user_id, period="weekly")
+                )
             except Exception:
                 logger.exception("Weekly report failed for user %s", user_id)
 
     async def _monthly_report_job(self, context: Any) -> None:
         """Execute monthly report for all users."""
-        user_ids = await self._get_all_users()
+        user_ids = await self._get_target_users(context)
         for user_id in user_ids:
             try:
-                await self._deliver_report(user_id, period="monthly")
+                await self._run_locked(
+                    user_id, lambda: self._deliver_report(user_id, period="monthly")
+                )
             except Exception:
                 logger.exception("Monthly report failed for user %s", user_id)
 
@@ -196,7 +209,10 @@ class TelegramScheduler:
         for target_user in [uid for uid in target_users if uid]:
             try:
                 if self.flows and self.flows.post_workout:
-                    await self.flows.post_workout.execute(target_user, activity_payload)
+                    await self._run_locked(
+                        target_user,
+                        lambda: self.flows.post_workout.execute(target_user, activity_payload),
+                    )
             except Exception:
                 logger.exception("Post-workout flow failed for user %s", target_user)
 
@@ -228,8 +244,21 @@ class TelegramScheduler:
             if period == "weekly"
             else await self.reports.generate_monthly(user_id)
         )
-        for message in renderer.render_weekly_report(report_data):
+        messages = (
+            renderer.render_weekly_report(report_data)
+            if period == "weekly"
+            else renderer.render_monthly_report(report_data)
+        )
+        for message in messages:
             await self.delivery.send_message(user_id, message)
+
+    async def _run_locked(self, user_id: str, action: Any) -> None:
+        if self.locker is None:
+            await action()
+            return
+        lock = self.locker.get_user_lock(user_id)
+        async with lock:
+            await action()
 
     def _normalize_activity(self, activity: dict[str, Any] | Any) -> dict[str, Any]:
         if isinstance(activity, dict):
@@ -243,14 +272,30 @@ class TelegramScheduler:
         return {}
 
 
-def _parse_time(value: Any, default: dt_time) -> dt_time:
+def _parse_time(value: Any, default: dt_time, timezone: str) -> dt_time:
     """Parse a time string (HH:MM) or return default."""
+    tz = ZoneInfo(timezone)
     if isinstance(value, dt_time):
-        return value
+        return value if value.tzinfo else dt_time(value.hour, value.minute, tzinfo=tz)
     if isinstance(value, str):
         try:
             parts = value.split(":")
-            return dt_time(int(parts[0]), int(parts[1]))
+            return dt_time(int(parts[0]), int(parts[1]), tzinfo=tz)
         except (ValueError, IndexError):
             pass
-    return default
+    return dt_time(default.hour, default.minute, tzinfo=tz)
+
+
+def _parse_weekday(value: Any) -> int:
+    if isinstance(value, int) and 0 <= value <= 6:
+        return value
+    mapping = {
+        "monday": 0,
+        "tuesday": 1,
+        "wednesday": 2,
+        "thursday": 3,
+        "friday": 4,
+        "saturday": 5,
+        "sunday": 6,
+    }
+    return mapping.get(str(value).lower(), 6)

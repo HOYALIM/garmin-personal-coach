@@ -11,8 +11,19 @@ from __future__ import annotations
 from typing import Any
 
 
+def _as_payload(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if hasattr(value, "to_dict"):
+        result = value.to_dict()
+        if isinstance(result, dict):
+            return result
+    return {}
+
+
 def render_readiness(readiness: dict[str, Any]) -> str:
     """Render ReadinessScore data into a Telegram message."""
+    readiness = _as_payload(readiness)
     score = readiness.get("score", "?")
     level = readiness.get("level", "unknown").lower()
     emoji = {"green": "🟢", "yellow": "🟡", "red": "🔴", "critical": "🚨"}.get(level, "⚪")
@@ -47,6 +58,7 @@ def render_readiness(readiness: dict[str, Any]) -> str:
 
 def render_workout_analysis(analysis: dict[str, Any]) -> str:
     """Render WorkoutAnalysis into Telegram message."""
+    analysis = _as_payload(analysis)
     lines = ["📊 세션 분석:"]
 
     summary = analysis.get("summary", "")
@@ -73,6 +85,7 @@ def render_workout_analysis(analysis: dict[str, Any]) -> str:
 
 def render_nutrition_advice(advice: dict[str, Any]) -> str:
     """Render nutrition advice into Telegram message."""
+    advice = _as_payload(advice)
     lines = ["🍽️ 영양 권장:"]
 
     timing = advice.get("timing")
@@ -100,12 +113,13 @@ def render_nutrition_advice(advice: dict[str, Any]) -> str:
 
 def render_weekly_plan(plan: dict[str, Any]) -> str:
     """Render WeeklyPlan into Telegram message."""
+    plan = _as_payload(plan)
     lines = ["📅 이번 주 계획:\n━━━━━━━━━━━━━━━━━━"]
 
     days = plan.get("days", [])
     day_names = ["월", "화", "수", "목", "금", "토", "일"]
     for i, day in enumerate(days):
-        name = day_names[i] if i < len(day_names) else f"Day{i+1}"
+        name = day_names[i] if i < len(day_names) else f"Day{i + 1}"
         session = day.get("description", day.get("session_type", ""))
         lines.append(f"{name}: {session}")
 
@@ -121,18 +135,21 @@ def render_weekly_plan(plan: dict[str, Any]) -> str:
 
 
 def render_weekly_report(report: dict[str, Any]) -> list[str]:
-    """Render weekly report — may produce multiple messages.
+    return _render_periodic_report(report, "주간 트레이닝 리포트", "이번 주")
 
-    Returns a list of message strings (split for Telegram 4096 char limit).
-    """
+
+def render_monthly_report(report: dict[str, Any]) -> list[str]:
+    return _render_periodic_report(report, "월간 트레이닝 리포트", "이번 달")
+
+
+def _render_periodic_report(report: dict[str, Any], title: str, summary_label: str) -> list[str]:
+    report = _as_payload(report)
     messages: list[str] = []
 
-    # Header
     period = report.get("period", "")
-    header = f"📊 주간 트레이닝 리포트 ({period})\n"
+    header = f"📊 {title} ({period})\n"
 
-    # Summary section
-    summary_lines = [header, "🏃 이번 주 요약:\n━━━━━━━━━━━━━━━━━━"]
+    summary_lines = [header, f"🏃 {summary_label} 요약:\n━━━━━━━━━━━━━━━━━━"]
     s = report.get("summary", {})
     if s:
         summary_lines.append(f"운동 횟수: {s.get('sessions', '?')}회")
@@ -189,6 +206,34 @@ def render_weekly_report(report: dict[str, Any]) -> list[str]:
         if bb is not None:
             rec_lines.append(f"- Body Battery 평균: {bb}/100")
         messages.append("\n".join(rec_lines))
+
+    feedback = report.get("feedback", {})
+    if feedback:
+        feedback_lines = ["📝 피드백 요약:"]
+        avg_rpe = feedback.get("average_rpe")
+        if avg_rpe is not None:
+            feedback_lines.append(f"- 평균 RPE: {avg_rpe}")
+        pain_reports = feedback.get("pain_reports")
+        if pain_reports:
+            feedback_lines.append(f"- 통증 보고: {pain_reports}회")
+        partial = feedback.get("partial_feedbacks")
+        skipped = feedback.get("skipped_feedbacks")
+        if partial:
+            feedback_lines.append(f"- 부분 완료 피드백: {partial}회")
+        if skipped:
+            feedback_lines.append(f"- 건너뛰기/중단 피드백: {skipped}회")
+        feedback_notes = feedback.get("notes") or []
+        for note in feedback_notes[:3]:
+            feedback_lines.append(f"- {note}")
+        if len(feedback_lines) > 1:
+            messages.append("\n".join(feedback_lines))
+
+    missing_data_notes = report.get("missing_data_notes") or []
+    if missing_data_notes:
+        missing_lines = ["ℹ️ 데이터 상태:"]
+        for note in missing_data_notes:
+            missing_lines.append(f"- {note}")
+        messages.append("\n".join(missing_lines))
 
     # Coach comment
     comment = report.get("coach_comment")

@@ -16,7 +16,16 @@ import uuid
 from datetime import date
 from typing import Any
 
-from garmin_coach.ports import Button, CoachingPort, Option, Report
+from garmin_coach.interfaces.telegram import renderer
+from garmin_coach.ports import (
+    Button,
+    CoachingPort,
+    InputAbortReason,
+    InputAborted,
+    InputType,
+    Option,
+    Report,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +33,7 @@ _MAX_MSG_LEN = 4096
 _TARGET_MSG_LEN = 4000
 # Timeout for waiting on user input (seconds)
 _INPUT_TIMEOUT = 300  # 5 minutes
+_SEND_RETRIES = 3
 
 
 def _load_telegram():
@@ -84,9 +94,20 @@ class TelegramAdapter(CoachingPort):
                 split_at = _TARGET_MSG_LEN
             else:
                 split_at += 1
+            while split_at > 0 and self._has_dangling_escape(remaining[:split_at]):
+                split_at -= 1
             chunks.append(remaining[:split_at])
             remaining = remaining[split_at:]
         return chunks
+
+    def _has_dangling_escape(self, text: str) -> bool:
+        count = 0
+        for ch in reversed(text):
+            if ch == "\\":
+                count += 1
+            else:
+                break
+        return count % 2 == 1
 
     def _find_split_boundary(self, text: str) -> int:
         for separator in ("\n\n", "\n"):
@@ -158,6 +179,20 @@ class TelegramAdapter(CoachingPort):
             return True
         return False
 
+    async def _call_with_retry(self, func: Any, **kwargs: Any) -> None:
+        last_error: Exception | None = None
+        for attempt in range(_SEND_RETRIES):
+            try:
+                await func(**kwargs)
+                return
+            except Exception as exc:
+                last_error = exc
+                logger.warning("Telegram send attempt %s failed", attempt + 1, exc_info=exc)
+                if attempt < _SEND_RETRIES - 1:
+                    await asyncio.sleep(0.2 * (attempt + 1))
+        if last_error:
+            raise last_error
+
     # -- CoachingPort implementation ------------------------------------
 
     async def send_message(
@@ -166,16 +201,19 @@ class TelegramAdapter(CoachingPort):
         text: str,
         buttons: list[Button] | None = None,
     ) -> None:
-        chunks = self._split_message(text)
+        escaped_text = renderer.escape_markdown_v2(text)
+        chunks = self._split_message(escaped_text)
         for i, chunk in enumerate(chunks):
             if len(chunk) > _MAX_MSG_LEN:
                 raise ValueError(f"Telegram message chunk exceeded limit: {len(chunk)}")
             reply_markup = None
             if buttons and i == len(chunks) - 1:
                 reply_markup = self._make_inline_keyboard(buttons)
-            await self.bot.send_message(
+            await self._call_with_retry(
+                self.bot.send_message,
                 chat_id=int(user_id),
                 text=chunk,
+                parse_mode="MarkdownV2",
                 reply_markup=reply_markup,
             )
 
@@ -185,7 +223,8 @@ class TelegramAdapter(CoachingPort):
         image: bytes,
         caption: str | None = None,
     ) -> None:
-        await self.bot.send_photo(
+        await self._call_with_retry(
+            self.bot.send_photo,
             chat_id=int(user_id),
             photo=image,
             caption=caption,
@@ -209,9 +248,17 @@ class TelegramAdapter(CoachingPort):
 
     async def request_text(self, user_id: str, prompt: str) -> str:
         if prompt:
-            await self.send_message(user_id, prompt)
+            await self.send_message(
+                user_id,
+                prompt,
+                buttons=[Button(label="❌ 취소", callback_data="input:cancel")],
+            )
         result = await self._wait_for_input(user_id)
-        return str(result) if result is not None else ""
+        if result is None:
+            raise InputAborted(InputType.TEXT, InputAbortReason.TIMEOUT)
+        if result == "input:cancel":
+            raise InputAborted(InputType.TEXT, InputAbortReason.CANCELLED)
+        return str(result)
 
     async def request_number(
         self,
@@ -232,7 +279,9 @@ class TelegramAdapter(CoachingPort):
             await self.send_message(user_id, f"{prompt}{bounds}")
             raw = await self._wait_for_input(user_id)
             if raw is None:
-                return 0.0
+                raise InputAborted(InputType.NUMBER, InputAbortReason.TIMEOUT)
+            if raw == "input:cancel":
+                raise InputAborted(InputType.NUMBER, InputAbortReason.CANCELLED)
             try:
                 val = float(str(raw))
                 if min_val is not None and val < min_val:
@@ -247,10 +296,16 @@ class TelegramAdapter(CoachingPort):
 
     async def request_date(self, user_id: str, prompt: str) -> date:
         while True:
-            await self.send_message(user_id, f"{prompt}\n(형식: YYYY-MM-DD)")
+            await self.send_message(
+                user_id,
+                f"{prompt}\n(형식: YYYY-MM-DD)",
+                buttons=[Button(label="❌ 취소", callback_data="input:cancel")],
+            )
             raw = await self._wait_for_input(user_id)
             if raw is None:
-                return date.today()
+                raise InputAborted(InputType.DATE, InputAbortReason.TIMEOUT)
+            if raw == "input:cancel":
+                raise InputAborted(InputType.DATE, InputAbortReason.CANCELLED)
             try:
                 return date.fromisoformat(str(raw).strip())
             except ValueError:
@@ -264,16 +319,27 @@ class TelegramAdapter(CoachingPort):
         prompt: str,
         options: list[Option],
     ) -> str:
-        keyboard = self._options_to_keyboard(options)
-        await self.bot.send_message(
+        buttons = [
+            Button(
+                label=f"{opt.emoji} {opt.label}" if opt.emoji else opt.label,
+                callback_data=f"opt:{opt.value}",
+            )
+            for opt in options
+        ]
+        buttons.append(Button(label="❌ 취소", callback_data="input:cancel"))
+        keyboard = self._make_inline_keyboard(buttons, cols=2)
+        await self._call_with_retry(
+            self.bot.send_message,
             chat_id=int(user_id),
             text=prompt,
             reply_markup=keyboard,
         )
         result = await self._wait_for_input(user_id)
         if result is None:
-            return options[0].value if options else ""
+            raise InputAborted(InputType.SELECT, InputAbortReason.TIMEOUT)
         raw = str(result)
+        if raw == "input:cancel":
+            raise InputAborted(InputType.SELECT, InputAbortReason.CANCELLED)
         if raw.startswith("opt:"):
             return raw[4:]
         return raw
@@ -295,9 +361,11 @@ class TelegramAdapter(CoachingPort):
                 label = f"{prefix}{emoji}{opt.label}"
                 buttons.append(Button(label=label, callback_data=f"msel:{opt.value}"))
             buttons.append(Button(label="✅ 완료", callback_data="msel:__done__"))
+            buttons.append(Button(label="❌ 취소", callback_data="msel:__cancel__"))
 
             keyboard = self._make_inline_keyboard(buttons, cols=2)
-            await self.bot.send_message(
+            await self._call_with_retry(
+                self.bot.send_message,
                 chat_id=int(user_id),
                 text=prompt,
                 reply_markup=keyboard,
@@ -305,11 +373,13 @@ class TelegramAdapter(CoachingPort):
 
             result = await self._wait_for_input(user_id)
             if result is None:
-                break
+                raise InputAborted(InputType.MULTI_SELECT, InputAbortReason.TIMEOUT)
 
             raw = str(result)
             if raw == "msel:__done__":
                 break
+            if raw == "msel:__cancel__":
+                raise InputAborted(InputType.MULTI_SELECT, InputAbortReason.CANCELLED)
             if raw.startswith("msel:"):
                 val = raw[5:]
                 if val in selected:
@@ -326,8 +396,10 @@ class TelegramAdapter(CoachingPort):
             buttons=[Button(label="⏭️ 건너뛰기", callback_data="photo:skip")],
         )
         result = await self._wait_for_input(user_id)
-        if result is None or result == "photo:skip":
-            return None
+        if result is None:
+            raise InputAborted(InputType.PHOTO, InputAbortReason.TIMEOUT)
+        if result == "photo:skip":
+            raise InputAborted(InputType.PHOTO, InputAbortReason.SKIPPED)
         if isinstance(result, bytes):
             return result
-        return None
+        raise InputAborted(InputType.PHOTO, InputAbortReason.CANCELLED)

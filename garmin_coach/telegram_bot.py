@@ -3,10 +3,13 @@ import importlib
 import json
 import logging
 import os
+import uuid
+import yaml
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 try:
     importlib.import_module("telegram")
@@ -16,20 +19,83 @@ except ImportError:
     TELEGRAM_AVAILABLE = False
 
 from garmin_coach._version import __version__
-from garmin_coach.activity_fetch import fetch_morning_metrics, fetch_recent_activities
+import garmin_coach.activity_fetch as activity_fetch_module
+from garmin_coach.activity_fetch import (
+    fetch_morning_metrics,
+    fetch_recent_activities,
+    safe_get_daily_summary,
+)
+from garmin_coach.adapters.garmin import GarminAdapter
+import garmin_coach.adapters.garmin as garmin_adapter_module
+from garmin_coach.engine.coaching import GarminCoachingEngine
+from garmin_coach.engine.interfaces import CoachingContext
+from garmin_coach.engine.readiness import ReadinessCalculator
+from garmin_coach.feedback import FeedbackAggregatorService
 from garmin_coach.flows import (
     EveningCheckinFlow,
+    GoalsFlow,
     InjuryReportFlow,
     MorningBriefingFlow,
     NutritionLogFlow,
+    OnboardingFlow,
     PostWorkoutFlow,
+    SettingsFlow,
 )
 from garmin_coach.integrations.sync import SyncEventBus
+from garmin_coach.integrations.sync import GarminSyncService
 from garmin_coach.interfaces.telegram.adapter import TelegramAdapter
 from garmin_coach.interfaces.telegram.handlers import TelegramHandlers
 from garmin_coach.interfaces.telegram.scheduler import TelegramScheduler
+from garmin_coach.models import (
+    ActivitySummary,
+    BodyBatteryData,
+    CoachingPreferences,
+    FitnessLevel as EngineFitnessLevel,
+    GarminAuth,
+    HealthMetrics,
+    InjuryRecord,
+    MedicalProfile,
+    NutritionProfile,
+    RHRData,
+    SleepData,
+    StravaAuth,
+    TrainingGoal,
+    TrainingLoad,
+    TrainingReadinessData,
+    UserProfile as EngineUserProfile,
+)
+from garmin_coach.models.coaching import (
+    CoachingResponse,
+    SessionType,
+    WeeklyPlan,
+    WorkoutAnalysis,
+    DayPlan,
+)
+from garmin_coach.models.health_metrics import ReadinessScore
+from garmin_coach.models.reporting import (
+    WeeklyRecoverySummary,
+    WeeklyReport,
+    WeeklyReportSummary,
+    WeeklyTrainingLoadSummary,
+)
+from garmin_coach.models.feedback import (
+    FeedbackCollectionStatus,
+    FeedbackCompletion,
+    PainReport,
+    SessionFeedback,
+)
+from garmin_coach.nutrition import (
+    calculate_nutrition_targets,
+    recommend_post_workout,
+    recommend_pre_workout,
+)
+from garmin_coach.ports import Option
+from garmin_coach.ports import InputAbortReason, InputAborted
+from garmin_coach.profile_manager import ProfileManager
+from garmin_coach.reports import MonthlyReportGenerator, WeeklyReportGenerator
+from garmin_coach.storage.database import GarminCoachDatabase
 from garmin_coach.training_load_manager import get_training_load_manager
-from garmin_coach.wizard import load_config
+from garmin_coach.weekly_review import get_week_stats
 
 
 logging.basicConfig(level=logging.INFO)
@@ -39,6 +105,13 @@ logger = logging.getLogger(__name__)
 DATA_DIR = Path.home() / ".config" / "garmin_coach"
 STATE_DIR = DATA_DIR / "telegram_states"
 USER_FILE = STATE_DIR / "telegram_users.json"
+PROFILE_DIR = STATE_DIR / "profiles"
+INJURY_DIR = STATE_DIR / "injuries"
+GUARDRAIL_DIR = STATE_DIR / "guardrails"
+MORNING_PLAN_DIR = STATE_DIR / "morning_plans"
+ONBOARDING_PROGRESS_DIR = STATE_DIR / "onboarding_progress"
+GARTH_USER_DIR = STATE_DIR / "garth"
+RUNTIME_DB = DATA_DIR / "telegram_runtime.db"
 
 
 @dataclass
@@ -86,12 +159,31 @@ class TelegramRuntimeConfig:
 def _ensure_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
+    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    INJURY_DIR.mkdir(parents=True, exist_ok=True)
+    GUARDRAIL_DIR.mkdir(parents=True, exist_ok=True)
+    MORNING_PLAN_DIR.mkdir(parents=True, exist_ok=True)
+    ONBOARDING_PROGRESS_DIR.mkdir(parents=True, exist_ok=True)
+    GARTH_USER_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _load_telegram_modules():
     telegram = importlib.import_module("telegram")
     telegram_ext = importlib.import_module("telegram.ext")
     return telegram, telegram_ext
+
+
+@contextmanager
+def _scoped_garth_home(user_id: str):
+    original = garmin_adapter_module.GARTH_HOME
+    original_fetch = activity_fetch_module.GARTH_HOME
+    garmin_adapter_module.GARTH_HOME = str(GARTH_USER_DIR / user_id)
+    activity_fetch_module.GARTH_HOME = str(GARTH_USER_DIR / user_id)
+    try:
+        yield
+    finally:
+        garmin_adapter_module.GARTH_HOME = original
+        activity_fetch_module.GARTH_HOME = original_fetch
 
 
 class TelegramUserRegistry:
@@ -124,254 +216,726 @@ class TelegramUserRegistry:
 
 
 class _ScheduleConfigProvider:
-    def __init__(self, registry: TelegramUserRegistry) -> None:
+    def __init__(
+        self, registry: TelegramUserRegistry, profile_service: "_UserProfileService"
+    ) -> None:
         self.registry = registry
+        self.profile_service = profile_service
 
     async def get_schedule_config(self, user_id: str) -> dict[str, Any]:
-        config = load_config()
-        schedule = config.get("schedule", {})
-        return {
-            "morning_time": schedule.get("morning_checkin", {}).get("time", "07:00"),
-            "evening_time": schedule.get("evening_checkin", {}).get("time", "21:00"),
-        }
+        return await self.profile_service.get_schedule_config(user_id)
 
     async def get_all_user_ids(self) -> list[str]:
         return await self.registry.get_all_user_ids()
 
 
-class _MessageOnlyFlow:
-    def __init__(self, adapter: TelegramAdapter, text: str) -> None:
-        self.adapter = adapter
-        self.text = text
+class _RuntimeDataBridge:
+    def __init__(self, profile_service: Any, database: GarminCoachDatabase) -> None:
+        self.profile_service = profile_service
+        self.database = database
+        self.engine = GarminCoachingEngine()
+        self.readiness_calc = ReadinessCalculator()
+        self.feedback_service = FeedbackAggregatorService(database, GUARDRAIL_DIR)
 
-    async def execute(self, user_id: str) -> None:
-        await self.adapter.send_message(user_id, self.text)
+    def load_engine_user(self, user_id: str) -> EngineUserProfile:
+        profile = self.profile_service._load(user_id)
+        if not profile:
+            raise RuntimeError(f"Missing profile for user {user_id}")
+        goal_date = profile.profile.goal_date or None
+        target_date = date.fromisoformat(goal_date) if goal_date else None
+        return EngineUserProfile(
+            garmin_credentials=GarminAuth(
+                email=profile.garmin.email or f"{user_id}@telegram.local",
+                connected=profile.garmin.connected,
+            ),
+            birth_date=date.today() - timedelta(days=max(profile.profile.age, 18) * 365),
+            sex=profile.profile.sex.value,
+            height_cm=profile.profile.height_cm,
+            weight_kg=profile.profile.weight_kg,
+            goal=TrainingGoal(
+                type=profile.profile.primary_sport.value,
+                target_event=profile.profile.goal_event or None,
+                target_date=target_date,
+                weekly_volume_km=0.0,
+            ),
+            fitness_level=EngineFitnessLevel(
+                level=profile.profile.fitness_level.value,
+                weekly_avg_sessions=float(profile.profile.available_days),
+            ),
+            medical=MedicalProfile(
+                cardiac_conditions=list(profile.medical.cardiac_conditions),
+                hypertension=profile.medical.hypertension,
+                diabetes=profile.medical.diabetes,
+                respiratory=list(profile.medical.respiratory),
+                current_injuries=self._merged_injuries(user_id, profile),
+                beta_blocker=profile.medical.beta_blocker,
+                notes=profile.medical.notes,
+            ),
+            nutrition=NutritionProfile(
+                dietary_restrictions=list(profile.nutrition.food_restrictions),
+                allergies=list(profile.nutrition.allergies),
+                meal_pattern=profile.nutrition.meal_pattern,
+                supplements=list(profile.nutrition.supplements),
+                alcohol_frequency=profile.nutrition.alcohol_frequency,
+            ),
+            preferences=CoachingPreferences(
+                tone=profile.ai_coach.tone.value,
+                preferred_training_time=profile.preferences.preferred_training_time,
+                cross_training_preferences=list(profile.preferences.cross_training_preferences),
+                notification_frequency=profile.preferences.notification_frequency,
+                units=profile.preferences.units,
+                timezone=profile.preferences.timezone,
+            ),
+            sleep=None,
+            strava_auth=StravaAuth(connected=profile.preferences.strava_connected),
+        )
+
+    def build_health_metrics(self, user_id: str, target_date: date | None = None) -> HealthMetrics:
+        metric_date = target_date or date.today()
+        payload = self.database.load_daily_health(user_id, metric_date.isoformat())
+        if payload is None:
+            self.refresh_user(user_id, metric_date)
+            payload = self.database.load_daily_health(user_id, metric_date.isoformat()) or {}
+        recent_activities = [
+            self.to_activity_model(item)
+            for item in self.database.list_recent_activities(user_id, limit=7)
+        ]
+        training_load_payload = payload.get("training_load") if isinstance(payload, dict) else None
+        readiness_payload = payload.get("readiness") if isinstance(payload, dict) else None
+        metrics = HealthMetrics(
+            metric_date=metric_date,
+            sleep=SleepData(score=self._sleep_score(payload)),
+            body_battery=BodyBatteryData(morning_value=self._body_battery(payload)),
+            rhr=RHRData(value_bpm=self._rhr(payload)),
+            training_readiness=TrainingReadinessData(
+                score=self._training_readiness(payload), level=None
+            ),
+            training_load=TrainingLoad(
+                ctl=float((training_load_payload or {}).get("ctl", 0.0)),
+                atl=float((training_load_payload or {}).get("atl", 0.0)),
+                tsb=float((training_load_payload or {}).get("tsb", 0.0)),
+                ramp_rate=float((training_load_payload or {}).get("ramp_rate", 0.0)),
+                weekly_volume_km=sum(activity.distance_km or 0.0 for activity in recent_activities),
+            ),
+            recent_activities=recent_activities,
+        )
+        metrics.readiness = (
+            ReadinessScore(
+                score=int(readiness_payload.get("score", 50)),
+                level=str(readiness_payload.get("level", "yellow")),
+                components=readiness_payload.get("components", {}),
+                component_weights=readiness_payload.get("component_weights", {}),
+                confidence=str(readiness_payload.get("confidence", "medium")),
+                reason=str(readiness_payload.get("reason", "")),
+                input_snapshot=readiness_payload.get("input_snapshot", {}),
+                limiting_factors=readiness_payload.get("limiting_factors", []),
+            )
+            if isinstance(readiness_payload, dict) and readiness_payload
+            else self.readiness_calc.calculate(metrics)
+        )
+        return metrics
+
+    def refresh_user(self, user_id: str, metric_date: date | None = None) -> None:
+        target = metric_date or date.today()
+        with _scoped_garth_home(user_id):
+            service = GarminSyncService(GarminAdapter(), self.database, user_id=user_id)
+            service.sync_recent_activities()
+            service.sync_daily_health(target)
+
+    def load_feedback_history(self, user_id: str, limit: int = 8) -> list[SessionFeedback]:
+        return [
+            SessionFeedback.from_dict(item)
+            for item in self.database.list_feedback(user_id, limit=limit)
+        ]
+
+    def load_recovery_summary(self, user_id: str) -> WeeklyRecoverySummary:
+        rows = self.database.list_recent_daily_health(user_id, limit=7)
+        sleep_scores = [
+            float(row["sleep_score"]) for row in rows if row.get("sleep_score") is not None
+        ]
+        body_battery = [
+            float(row["body_battery"]) for row in rows if row.get("body_battery") is not None
+        ]
+        avg_sleep = None
+        if sleep_scores:
+            avg_sleep = f"{sum(sleep_scores) / len(sleep_scores):.0f}/100"
+        return WeeklyRecoverySummary(
+            avg_sleep=avg_sleep,
+            avg_sleep_score=(sum(sleep_scores) / len(sleep_scores)) if sleep_scores else None,
+            avg_body_battery=(sum(body_battery) / len(body_battery)) if body_battery else None,
+        )
+
+    async def create_readiness(self, user_id: str) -> ReadinessScore:
+        metrics = self.build_health_metrics(user_id)
+        return metrics.readiness or self.readiness_calc.calculate(metrics)
+
+    async def create_daily_coaching(
+        self, user_id: str, readiness: dict[str, Any] | ReadinessScore
+    ) -> CoachingResponse:
+        metrics = self.build_health_metrics(user_id)
+        actual = (
+            readiness
+            if isinstance(readiness, ReadinessScore)
+            else (metrics.readiness or self.readiness_calc.calculate(metrics))
+        )
+        return await self.engine.generate_daily_coaching(
+            self.load_engine_user(user_id), metrics, actual
+        )
+
+    async def create_weekly_plan(self, user_id: str) -> WeeklyPlan:
+        metrics = self.build_health_metrics(user_id)
+        return await self.engine.generate_weekly_plan(
+            self.load_engine_user(user_id),
+            metrics.training_load,
+            [metrics.readiness] if metrics.readiness else [],
+            self.load_feedback_history(user_id),
+        )
+
+    async def create_answer(self, user_id: str, question: str) -> str:
+        metrics = self.build_health_metrics(user_id)
+        context = CoachingContext(
+            recent_activities=metrics.recent_activities,
+            current_metrics=metrics,
+            readiness=metrics.readiness,
+            notes=["telegram"],
+        )
+        response = await self.engine.answer_question(
+            self.load_engine_user(user_id), question, context
+        )
+        return response.text
+
+    async def create_workout_analysis(
+        self, user_id: str, activity: dict[str, Any]
+    ) -> WorkoutAnalysis:
+        return await self.engine.generate_workout_analysis(
+            self.load_engine_user(user_id), self.to_activity_model(activity)
+        )
+
+    async def create_report(self, user_id: str, window_days: int, label: str) -> WeeklyReport:
+        end_date = date.today()
+        weekly_plan = await self.create_weekly_plan(user_id)
+        notes = weekly_plan.notes[0] if weekly_plan.notes else ""
+        generator = WeeklyReportGenerator(self.database, self.feedback_service)
+        if window_days >= 30:
+            return await MonthlyReportGenerator(self.database, self.feedback_service).generate(
+                user_id,
+                end_date=end_date,
+                label=label,
+                coach_comment=notes,
+            )
+        return await generator.generate(
+            user_id,
+            end_date=end_date,
+            window_days=window_days,
+            label=label,
+            coach_comment=notes,
+        )
+
+    async def create_daily_guide(self, user_id: str) -> dict[str, Any]:
+        profile = self.profile_service._load(user_id)
+        if not profile:
+            return {
+                "session_type": "일반일",
+                "macros": {},
+                "hydration": "기본 수분 섭취를 유지하세요.",
+            }
+        targets = calculate_nutrition_targets(
+            weight_kg=profile.profile.weight_kg,
+            height_cm=int(profile.profile.height_cm),
+            age=profile.profile.age,
+            sex=profile.profile.sex.value,
+            sport=profile.profile.primary_sport.value,
+            duration_minutes=60,
+            intensity="moderate",
+        )
+        return {
+            "session_type": profile.profile.primary_sport.value,
+            "macros": {
+                "carbs_g": (targets.carbs_grams * 0.8, targets.carbs_grams * 1.1),
+                "protein_g": (targets.protein_grams * 0.9, targets.protein_grams * 1.1),
+                "fat_g": (max(20, targets.fat_grams * 0.8),),
+            },
+            "hydration": f"하루 총 {targets.water_ml}ml + 운동 중 추가 보충",
+        }
+
+    async def create_pre_workout_advice(
+        self, user_id: str, session_type: str
+    ) -> dict[str, Any] | None:
+        profile = self.profile_service._load(user_id)
+        if not profile:
+            return None
+        duration_map = {"easy": 45, "moderate": 60, "tempo": 75, "interval": 75, "long": 120}
+        duration = duration_map.get(session_type.lower(), 60)
+        advice = recommend_pre_workout(profile.profile.primary_sport.value, duration)
+        return {
+            "description": f"{session_type} 세션 기준 · {advice['timing']} · 탄수화물 {advice['carbs']}",
+            "examples": advice["examples"],
+        }
+
+    async def create_recovery_advice(
+        self, user_id: str, activity: dict[str, Any]
+    ) -> dict[str, Any]:
+        profile = self.profile_service._load(user_id)
+        duration = int(float(activity.get("duration_min", 0) or 0))
+        sport = activity.get("type") or (
+            profile.profile.primary_sport.value if profile else "running"
+        )
+        advice = recommend_post_workout(str(sport), duration)
+        return {
+            "timing": advice["timing"],
+            "examples": advice["examples"],
+            "rationale": advice["ratio"],
+        }
+
+    def to_activity_model(self, payload: dict[str, Any]) -> ActivitySummary:
+        return ActivitySummary(
+            activity_id=payload.get("activity_id"),
+            type=payload.get("type"),
+            start_time=payload.get("start_time"),
+            distance_km=payload.get("distance_km"),
+            duration_min=payload.get("duration_min"),
+            avg_pace=payload.get("avg_pace"),
+            avg_hr=payload.get("avg_hr"),
+            calories=payload.get("calories"),
+            raw=payload,
+        )
+
+    def latest_activity_payload(self, user_id: str) -> dict[str, Any] | None:
+        activities = self.database.list_recent_activities(user_id, limit=1)
+        if activities:
+            return activities[0]
+        self.refresh_user(user_id)
+        activities = self.database.list_recent_activities(user_id, limit=1)
+        return activities[0] if activities else None
+
+    def _sleep_score(self, payload: dict[str, Any]) -> int | None:
+        sleep = payload.get("sleep") if isinstance(payload, dict) else None
+        if isinstance(sleep, dict):
+            value = sleep.get("overallScore") or sleep.get("sleepScore")
+            return int(value) if isinstance(value, (int, float)) else None
+        return None
+
+    def _body_battery(self, payload: dict[str, Any]) -> int | None:
+        body = payload.get("body_battery") if isinstance(payload, dict) else None
+        if isinstance(body, dict):
+            value = body.get("current_value") or body.get("morning_value")
+            return int(value) if isinstance(value, (int, float)) else None
+        return None
+
+    def _rhr(self, payload: dict[str, Any]) -> int | None:
+        rhr = payload.get("rhr") if isinstance(payload, dict) else None
+        if isinstance(rhr, dict):
+            value = rhr.get("value_bpm")
+            return int(value) if isinstance(value, (int, float)) else None
+        return None
+
+    def _training_readiness(self, payload: dict[str, Any]) -> int | None:
+        tr = payload.get("training_readiness") if isinstance(payload, dict) else None
+        if isinstance(tr, dict):
+            value = tr.get("score")
+            return int(value) if isinstance(value, (int, float)) else None
+        return None
+
+    def _load_current_injuries(self, user_id: str) -> list[InjuryRecord]:
+        path = GUARDRAIL_DIR / f"{user_id}.json"
+        if not path.exists():
+            return []
+        payload = json.loads(path.read_text())
+        return [
+            InjuryRecord(
+                body_part=payload.get("body_part", "unknown"),
+                description=payload.get("severity", "reported via telegram"),
+                restrictions=list(payload.get("restricted_session_types", [])),
+                pain_reports_count=int(payload.get("pain_reports_count", 0) or 0),
+                restricted_session_types=list(payload.get("restricted_session_types", [])),
+            )
+        ]
+
+    def _merged_injuries(self, user_id: str, profile: Any) -> list[InjuryRecord]:
+        combined: list[InjuryRecord] = []
+        seen: set[str] = set()
+        for injury in self._load_current_injuries(user_id):
+            key = (injury.body_part or "").strip().lower()
+            if key and key not in seen:
+                combined.append(injury)
+                seen.add(key)
+        for injury_name in list(getattr(profile.medical, "current_injuries", [])):
+            key = injury_name.strip().lower()
+            if key and key not in seen:
+                combined.append(
+                    InjuryRecord(
+                        body_part=injury_name.strip(),
+                        description="reported during onboarding/settings",
+                        medical_clearance="pending",
+                        restrictions=["avoid high intensity"],
+                        restricted_session_types=["hard", "interval", "tempo"],
+                    )
+                )
+                seen.add(key)
+        return combined
 
 
 class _RuntimeEngineProxy:
-    async def generate_weekly_plan(self, user_id: str) -> dict[str, Any]:
-        today = date.today()
-        monday = today - timedelta(days=today.weekday())
-        calc = get_training_load_manager().calculator
-        sessions = calc.get_sessions_in_range(monday, monday + timedelta(days=6))
-        by_day = {session.date.isoformat(): session for session in sessions}
-        days: list[dict[str, Any]] = []
-        for offset in range(7):
-            current = monday + timedelta(days=offset)
-            session = by_day.get(current.isoformat())
-            description = session.description if session else "회복 중심 또는 짧은 이지 세션"
-            session_type = (
-                getattr(getattr(session, "sport", None), "value", "easy") if session else "easy"
-            )
-            days.append(
-                {
-                    "date": current.isoformat(),
-                    "description": description,
-                    "session_type": session_type,
-                }
-            )
-        context = get_training_load_manager().get_context()
-        return {
-            "days": days,
-            "total_tss": context.get("ctl", 0) + context.get("atl", 0),
-            "notes": "몸 상태에 따라 강도를 조절하세요.",
-        }
+    def __init__(self, bridge: _RuntimeDataBridge) -> None:
+        self.bridge = bridge
+
+    async def generate_weekly_plan(self, user_id: str) -> WeeklyPlan:
+        return await self.bridge.create_weekly_plan(user_id)
 
     async def answer_question(self, user_id: str, question: str) -> str:
-        context = get_training_load_manager().get_context()
-        lowered = question.lower()
-        if "ctl" in lowered or "atl" in lowered or "tsb" in lowered:
-            return (
-                f"현재 CTL {context.get('ctl', 0):.1f}, ATL {context.get('atl', 0):.1f}, "
-                f"TSB {context.get('tsb', 0):.1f} 기준으로 보면 오늘은 회복과 강도 균형을 먼저 보시는 게 좋아요."
-            )
-        return "지금은 Telegram 코칭 경로가 새 스택으로 전환된 상태예요. /today, /week, /report, /nutrition, /injury 명령으로 바로 필요한 정보를 받으실 수 있어요."
+        return await self.bridge.create_answer(user_id, question)
 
 
 class _RuntimeReportService:
-    async def generate_weekly(self, user_id: str) -> dict[str, Any]:
-        return self._generate_report(window_days=7, label="최근 7일")
+    def __init__(self, bridge: _RuntimeDataBridge) -> None:
+        self.bridge = bridge
 
-    async def generate_monthly(self, user_id: str) -> dict[str, Any]:
-        return self._generate_report(window_days=30, label="최근 30일")
+    async def generate_weekly(self, user_id: str) -> WeeklyReport:
+        return await self.bridge.create_report(user_id, 7, "최근 7일")
 
-    def _generate_report(self, window_days: int, label: str) -> dict[str, Any]:
-        calc = get_training_load_manager().calculator
-        end_date = date.today()
-        start_date = end_date - timedelta(days=window_days - 1)
-        sessions = calc.get_sessions_in_range(start_date, end_date)
-        total_distance = 0.0
-        total_hours = 0.0
-        total_trimp = 0.0
-        for session in sessions:
-            total_hours += float(getattr(session, "duration_min", 0.0) or 0.0) / 60.0
-            total_trimp += float(getattr(session, "trimp", 0.0) or 0.0)
-        snapshot = calc.get_snapshot(end_date)
-        coach_comment = (
-            "회복 여유가 있어 계획을 소화할 수 있는 주간 흐름이에요."
-            if snapshot.tsb > -10
-            else "피로가 쌓여 있어 다음 주 초반 강도는 보수적으로 가져가세요."
-        )
-        return {
-            "period": label,
-            "summary": {
-                "sessions": len(sessions),
-                "total_distance_km": round(total_distance, 1),
-                "total_time": f"{total_hours:.1f}h",
-            },
-            "training_load": {
-                "ctl": snapshot.ctl,
-                "atl": snapshot.atl,
-                "tsb": snapshot.tsb,
-                "ramp_rate": 0.0,
-            },
-            "recovery": {
-                "avg_sleep": None,
-                "avg_sleep_score": None,
-                "hrv_trend": None,
-                "avg_body_battery": None,
-            },
-            "coach_comment": coach_comment,
-            "metadata": {"total_trimp": total_trimp},
-        }
+    async def generate_monthly(self, user_id: str) -> WeeklyReport:
+        return await self.bridge.create_report(user_id, 30, "최근 30일")
 
 
 class _ReadinessProvider:
-    async def get_readiness(self, user_id: str) -> dict[str, Any]:
-        metrics = fetch_morning_metrics(date.today().isoformat())
-        context = get_training_load_manager().get_context()
-        score = metrics.get("training_readiness")
-        if score is None:
-            body_battery = metrics.get("body_battery") or 50
-            sleep_hours = metrics.get("sleep_hours") or 6
-            score = int(min(100, max(0, body_battery * 0.6 + sleep_hours * 5)))
-        level = "green" if score >= 75 else "yellow" if score >= 55 else "red"
-        return {
-            "score": score,
-            "level": level,
-            "components": {
-                "body_battery": metrics.get("body_battery"),
-                "rhr": metrics.get("resting_hr"),
-                "tsb": round(context.get("tsb", 0.0), 1),
-                "sleep_score": int((metrics.get("sleep_hours") or 0) / 8 * 100)
-                if metrics.get("sleep_hours")
-                else None,
-            },
-        }
+    def __init__(self, bridge: _RuntimeDataBridge) -> None:
+        self.bridge = bridge
+
+    async def get_readiness(self, user_id: str) -> ReadinessScore:
+        return await self.bridge.create_readiness(user_id)
 
 
 class _DailyCoachingProvider:
+    def __init__(self, bridge: Any, plan_state: "_MorningPlanStateStore") -> None:
+        self.bridge = bridge
+        self.plan_state = plan_state
+
     async def generate_daily_coaching(
-        self, user_id: str, readiness: dict[str, Any]
-    ) -> dict[str, Any]:
-        score = readiness.get("score", 50)
-        tsb = readiness.get("components", {}).get("tsb", 0)
-        if score < 45 or tsb < -20:
-            return {
-                "text": "회복 우선으로 짧은 조깅이나 휴식을 권장해요.",
-                "session_type": "rest",
-                "guardrail_reason": "피로 지표가 높습니다.",
-            }
-        if score < 70:
-            return {
-                "text": "계획은 유지하되 초반 10분은 아주 가볍게 시작하세요.",
-                "session_type": "easy",
-            }
-        return {
-            "text": "오늘은 계획한 세션을 진행해도 괜찮아요. 몸이 무겁다면 강도를 한 단계 낮추세요.",
-            "session_type": "moderate",
-        }
+        self, user_id: str, readiness: dict[str, Any] | ReadinessScore
+    ) -> CoachingResponse:
+        state = self.plan_state.get_today_state(user_id)
+        if state.get("action") == "postpone":
+            return CoachingResponse(
+                text="오늘 세션은 내일로 미뤘어요. 오늘은 회복 우선으로 전환합니다.",
+                intensity="rest",
+                session_type=SessionType.REST,
+            )
+        if state.get("action") == "change":
+            selected = str(state.get("session_type") or "easy")
+            session = (
+                SessionType(selected)
+                if selected in {s.value for s in SessionType}
+                else SessionType.EASY
+            )
+            return CoachingResponse(
+                text=f"사용자 요청으로 오늘 세션을 {selected}로 변경해 적용했어요.",
+                intensity=selected,
+                session_type=session,
+            )
+        return await self.bridge.create_daily_coaching(user_id, readiness)
 
 
 class _DailySummaryProvider:
+    def __init__(self, bridge: Any) -> None:
+        self.bridge = bridge
+
     async def get_daily_summary(self, user_id: str) -> dict[str, Any]:
-        today = date.today()
-        activities = fetch_recent_activities(today)
-        latest = activities[-1] if activities else None
+        metrics = self.bridge.build_health_metrics(user_id)
+        today_iso = date.today().isoformat()
+        todays = [
+            activity
+            for activity in metrics.recent_activities
+            if str(getattr(activity, "start_time", "") or "").startswith(today_iso)
+        ]
+        latest = todays[-1] if todays else None
+        with _scoped_garth_home(user_id):
+            summary = safe_get_daily_summary(date.today().isoformat())
         return {
-            "workout": (latest.get("activity_name") or latest.get("type")) if latest else None,
-            "active_calories": latest.get("calories") if latest else None,
-            "steps": None,
-            "stress_avg": None,
+            "workout": (latest.raw.get("activity_name") or latest.type) if latest else None,
+            "active_calories": getattr(summary, "active_calories", None)
+            or getattr(summary, "total_calories", None)
+            or (latest.calories if latest else None),
+            "steps": getattr(summary, "steps", None) or getattr(summary, "total_steps", None),
+            "stress_avg": getattr(summary, "average_stress_level", None)
+            or getattr(summary, "stress_avg", None),
         }
 
 
 class _TomorrowPlanProvider:
+    def __init__(
+        self, bridge: Any, profile_service: Any, plan_state: "_MorningPlanStateStore"
+    ) -> None:
+        self.bridge = bridge
+        self.profile_service = profile_service
+        self.plan_state = plan_state
+
     async def get_tomorrow_plan(self, user_id: str) -> dict[str, Any]:
-        tsb = get_training_load_manager().get_context().get("tsb", 0.0)
-        session = "이지런" if tsb > -15 else "회복 세션"
-        return {"session": session, "recommended_bedtime": "22:30"}
+        state = self.plan_state.get_today_state(user_id)
+        if state.get("action") == "postpone":
+            return {"session": "미뤄둔 오늘 세션 재진행", "recommended_bedtime": "22:00"}
+        weekly_plan = await self.bridge.create_weekly_plan(user_id)
+        tomorrow = date.today() + timedelta(days=1)
+        day = next((item for item in weekly_plan.days if item.date == tomorrow.isoformat()), None)
+        bedtime = (
+            "22:00"
+            if day
+            and day.session_type in {SessionType.HARD, SessionType.INTERVAL, SessionType.TEMPO}
+            else "22:30"
+        )
+        return {
+            "session": day.description if day else "회복 세션",
+            "recommended_bedtime": bedtime,
+        }
 
 
 class _NutritionGuideProvider:
+    def __init__(self, bridge: _RuntimeDataBridge) -> None:
+        self.bridge = bridge
+
     async def get_daily_guide(self, user_id: str) -> dict[str, Any]:
-        return {
-            "session_type": "훈련일",
-            "macros": {"carbs_g": (220, 320), "protein_g": (110, 140), "fat_g": (50,)},
-            "hydration": "하루 전체로 2L 이상, 운동 전후 추가 보충",
-        }
+        return await self.bridge.create_daily_guide(user_id)
+
+
+class _PreWorkoutNutritionProvider:
+    def __init__(self, bridge: _RuntimeDataBridge) -> None:
+        self.bridge = bridge
+
+    async def get_pre_workout_advice(
+        self, user_id: str, session_type: str
+    ) -> dict[str, Any] | None:
+        return await self.bridge.create_pre_workout_advice(user_id, session_type)
 
 
 class _WorkoutAnalyzer:
-    async def analyze(self, user_id: str, activity: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "tss": round(float(activity.get("duration_min", 0) or 0) * 0.9, 1),
-            "training_effect_aerobic": activity.get("training_effect_aerobic"),
-            "training_effect_anaerobic": activity.get("training_effect_anaerobic"),
-            "coaching_notes": "수분과 회복 영양을 먼저 챙기고, 통증이 있으면 /injury 로 바로 기록하세요.",
-        }
+    def __init__(self, bridge: _RuntimeDataBridge) -> None:
+        self.bridge = bridge
+
+    async def analyze(self, user_id: str, activity: dict[str, Any]) -> WorkoutAnalysis:
+        return await self.bridge.create_workout_analysis(user_id, activity)
 
 
 class _RecoveryFuelProvider:
+    def __init__(self, bridge: _RuntimeDataBridge) -> None:
+        self.bridge = bridge
+
     async def get_advice(self, user_id: str, activity: dict[str, Any]) -> dict[str, Any]:
-        duration = float(activity.get("duration_min", 0) or 0)
-        examples = ["초코우유 + 바나나", "그릭요거트 + 그래놀라", "닭가슴살 샌드위치"]
-        timing = "운동 후 30분 이내" if duration >= 45 else "운동 후 1시간 이내"
-        return {
-            "timing": timing,
-            "examples": examples,
-            "rationale": "탄수화물과 단백질을 함께 보충하면 회복에 유리합니다.",
-        }
+        return await self.bridge.create_recovery_advice(user_id, activity)
 
 
 class _ManualFeedbackCollector:
-    def __init__(self, adapter: TelegramAdapter) -> None:
+    def __init__(self, adapter: TelegramAdapter, database: GarminCoachDatabase) -> None:
         self.adapter = adapter
+        self.database = database
 
     async def collect_manual(self, user_id: str) -> None:
-        note = await self.adapter.request_text(
-            user_id, "📝 오늘 세션에 대한 한 줄 피드백을 남겨주세요."
-        )
-        if note:
+        try:
+            rpe = int(
+                await self.adapter.request_number(
+                    user_id, "📝 오늘 세션의 체감 강도(RPE)를 입력해주세요.", 1, 10
+                )
+            )
+            feeling = await self.adapter.request_select(
+                user_id,
+                "전체적인 느낌을 선택해주세요.",
+                [
+                    Option("좋았어요", "good"),
+                    Option("보통", "neutral"),
+                    Option("힘들었어요", "bad"),
+                ],
+            )
+            note = await self.adapter.request_text(
+                user_id, "추가 메모가 있으면 입력해주세요. 없으면 '없음'이라고 적어주세요."
+            )
+            feedback = SessionFeedback(
+                session_date=date.today().isoformat(),
+                activity_id=f"manual-{uuid.uuid4().hex[:8]}",
+                completion=FeedbackCompletion.UNKNOWN,
+                feeling=feeling,
+                rpe=rpe,
+                note="" if note.strip().lower() in {"", "없음", "none"} else note.strip(),
+            )
+            self.database.save_feedback(
+                user_id,
+                feedback.activity_id or f"manual-{uuid.uuid4().hex[:8]}",
+                feedback.session_date,
+                feedback.to_dict(),
+            )
             await self.adapter.send_message(user_id, "✅ 피드백을 기록했어요.")
+        except InputAborted as exc:
+            if exc.reason == InputAbortReason.TIMEOUT:
+                await self.adapter.send_message(
+                    user_id, "⏱️ 피드백 입력 시간이 초과되어 저장하지 않았어요."
+                )
+            else:
+                await self.adapter.send_message(user_id, "⏹️ 피드백 입력을 취소했어요.")
+
+
+class _FeedbackStore(_ManualFeedbackCollector):
+    def __init__(self, adapter: TelegramAdapter, database: GarminCoachDatabase) -> None:
+        super().__init__(adapter, database)
+        self.service = FeedbackAggregatorService(database, GUARDRAIL_DIR)
+
+    async def save_feedback(self, user_id: str, activity_id: str, feedback: dict[str, Any]) -> None:
+        self.service.save_feedback(
+            user_id,
+            activity_id,
+            feedback,
+            activity_date=str(feedback.get("session_date") or date.today().isoformat()),
+        )
+
+
+class _NutritionStore:
+    def __init__(self, database: GarminCoachDatabase) -> None:
+        self.database = database
+
+    async def save_meal(self, user_id: str, meal: dict[str, Any]) -> None:
+        entry_id = f"meal-{uuid.uuid4().hex[:8]}"
+        self.database.save_nutrition_log(user_id, entry_id, date.today().isoformat(), meal)
+
+
+class _FoodPhotoAnalyzer:
+    def __init__(self, profile_service: _UserProfileService) -> None:
+        self.profile_service = profile_service
+
+    async def analyze(self, user_id: str, photo: bytes) -> dict[str, Any]:
+        profile = self.profile_service._load(user_id)
+        weight = profile.profile.weight_kg if profile else 70.0
+        height = int(profile.profile.height_cm) if profile else 170
+        age = profile.profile.age if profile else 30
+        sex = profile.profile.sex.value if profile else "other"
+        sport = profile.profile.primary_sport.value if profile else "running"
+        targets = calculate_nutrition_targets(weight, height, age, sex, sport, 45)
+        is_screenshot = photo.startswith(b"\x89PNG")
+        return {
+            "items_detected": ["운동 직후 간식"] if is_screenshot else ["한 끼 식사"],
+            "estimated_macros": {
+                "calories": int(targets.calories * (0.3 if is_screenshot else 0.4)),
+                "protein_g": int(targets.protein_grams * (0.35 if is_screenshot else 0.4)),
+                "carbs_g": int(targets.carbs_grams * (0.25 if is_screenshot else 0.3)),
+                "fat_g": int(targets.fat_grams * (0.2 if is_screenshot else 0.3)),
+            },
+            "coaching_note": "사진 기준 추정치예요. 실제 섭취량과 다르면 수정해서 저장하세요.",
+        }
 
 
 class _PhotoRouter:
+    def __init__(self, bridge: Any, food_analyzer: Any = None) -> None:
+        self.bridge = bridge
+        self.food_analyzer = food_analyzer or _FoodPhotoAnalyzer(bridge.profile_service)
+
     async def auto_detect_type(self, photo: bytes) -> str | None:
+        if photo.startswith(b"\x89PNG"):
+            return "workout"
+        if photo.startswith(b"\xff\xd8\xff"):
+            return "food"
         return None
 
     async def analyze_workout(self, user_id: str, photo: bytes) -> dict[str, Any]:
-        return {
-            "summary": "운동 캡쳐를 받았어요.",
-            "comparison_to_recent": "최근 세션과 함께 비교해볼 수 있어요.",
-            "coaching_notes": "기록을 확인하고 필요하면 /feedback 으로 주관적 피드백도 남겨주세요.",
-        }
+        activity = self.bridge.latest_activity_payload(user_id)
+        if not activity:
+            return {
+                "summary": "최근 운동 기록을 찾지 못했어요.",
+                "comparison_to_recent": "Garmin 동기화 후 다시 시도해주세요.",
+                "coaching_notes": [
+                    "기록을 확인하고 필요하면 /feedback 으로 주관적 피드백도 남겨주세요."
+                ],
+            }
+        analysis = (await self.bridge.create_workout_analysis(user_id, activity)).to_dict()
+        analysis["comparison_to_recent"] = (
+            "운동 캡쳐로 인식되어 최근 Garmin 활동 기록과 비교했어요."
+            if photo.startswith(b"\x89PNG")
+            else "일반 사진으로 판단되어 최근 Garmin 활동 기록 기준으로 보수적으로 해석했어요."
+        )
+        return analysis
 
     async def analyze_food(self, user_id: str, photo: bytes) -> dict[str, Any]:
+        analysis = await self.food_analyzer.analyze(user_id, photo)
         return {
             "timing": "식사 기록으로 반영했어요.",
-            "examples": ["탄수화물과 단백질 균형을 맞춰보세요."],
+            "examples": analysis.get("items_detected", ["탄수화물과 단백질 균형을 맞춰보세요."]),
+            "macros": {
+                "carbs": f"~{analysis.get('estimated_macros', {}).get('carbs_g', '?')}g",
+                "protein": f"~{analysis.get('estimated_macros', {}).get('protein_g', '?')}g",
+            },
         }
+
+
+class _MorningPlanStateStore:
+    def __init__(self, root: Path = MORNING_PLAN_DIR) -> None:
+        self.root = root
+
+    async def change_today_session(self, user_id: str, session_type: str) -> None:
+        payload = self._load(user_id)
+        payload[date.today().isoformat()] = {"action": "change", "session_type": session_type}
+        self._save(user_id, payload)
+
+    async def postpone_today(self, user_id: str) -> None:
+        payload = self._load(user_id)
+        payload[date.today().isoformat()] = {"action": "postpone"}
+        self._save(user_id, payload)
+
+    def get_today_state(self, user_id: str) -> dict[str, Any]:
+        return self._load(user_id).get(date.today().isoformat(), {})
+
+    def _load(self, user_id: str) -> dict[str, Any]:
+        path = self.root / f"{user_id}.json"
+        if not path.exists():
+            return {}
+        return json.loads(path.read_text())
+
+    def _save(self, user_id: str, payload: dict[str, Any]) -> None:
+        (self.root / f"{user_id}.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2)
+        )
 
 
 class _InjuryStorage:
+    def __init__(self, root: Path = INJURY_DIR) -> None:
+        self.root = root
+
     async def save_injury(self, user_id: str, injury: dict[str, Any]) -> None:
-        return None
+        path = self.root / f"{user_id}.json"
+        records = []
+        if path.exists():
+            records = json.loads(path.read_text())
+        records.append({**injury, "reported_at": datetime.now().isoformat()})
+        path.write_text(json.dumps(records, ensure_ascii=False, indent=2))
 
 
 class _GuardrailNotifier:
+    def __init__(self, root: Path = GUARDRAIL_DIR) -> None:
+        self.root = root
+
     async def on_injury_reported(self, user_id: str, injury: dict[str, Any]) -> None:
-        return None
+        severity = injury.get("severity", "mild")
+        restricted = (
+            ["hard", "interval", "tempo"] if severity in {"moderate", "severe"} else ["hard"]
+        )
+        payload = {
+            "body_part": injury.get("body_part", "unknown"),
+            "severity": severity,
+            "restricted_session_types": restricted,
+            "updated_at": datetime.now().isoformat(),
+        }
+        (self.root / f"{user_id}.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2)
+        )
+
+    async def on_profile_updated(self, user_id: str, profile: Any) -> None:
+        current_injuries = list(getattr(profile.medical, "current_injuries", []))
+        path = self.root / f"{user_id}.json"
+        if not current_injuries:
+            if path.exists():
+                path.unlink()
+            return
+        payload = {
+            "body_part": current_injuries[0],
+            "severity": "moderate",
+            "restricted_session_types": ["hard", "interval", "tempo"],
+            "updated_at": datetime.now().isoformat(),
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+        path.chmod(0o600)
 
 
 @dataclass
@@ -386,29 +950,474 @@ class _FlowRegistry:
     goals: Any
 
 
-def _build_flow_registry(adapter: TelegramAdapter) -> _FlowRegistry:
+class _UserProfileService:
+    def __init__(
+        self,
+        settings_side_effect: Callable[[str, str, Any], Awaitable[None] | None] | None = None,
+    ) -> None:
+        self._settings_side_effect = settings_side_effect
+
+    def _manager(self, user_id: str) -> Any:
+        return ProfileManager(config_path=PROFILE_DIR / f"{user_id}.yaml")
+
+    def _load(self, user_id: str) -> Any:
+        return self._manager(user_id).load()
+
+    def _save(self, user_id: str, profile: Any) -> None:
+        manager = self._manager(user_id)
+        manager.validate_or_raise(profile)
+        manager.save(profile)
+
+    def set_settings_side_effect(
+        self,
+        callback: Callable[[str, str, Any], Awaitable[None] | None] | None,
+    ) -> None:
+        self._settings_side_effect = callback
+
+    async def _emit_settings_side_effect(
+        self, user_id: str, change_kind: str, profile: Any
+    ) -> None:
+        if self._settings_side_effect is None:
+            return
+        result = self._settings_side_effect(user_id, change_kind, profile)
+        if asyncio.iscoroutine(result):
+            await result
+
+    async def _mutate_profile(
+        self,
+        user_id: str,
+        change_kind: str,
+        mutator: Callable[[Any], None],
+    ) -> None:
+        profile = self._load(user_id)
+        if profile is None:
+            raise ValueError(f"Profile not found for user {user_id}")
+        mutator(profile)
+        self._save(user_id, profile)
+        await self._emit_settings_side_effect(user_id, change_kind, profile)
+
+    def _progress_path(self, user_id: str) -> Path:
+        return ONBOARDING_PROGRESS_DIR / f"{user_id}.json"
+
+    def _default_progress(self) -> dict[str, Any]:
+        return {
+            "schema_version": 2,
+            "status": "in_progress",
+            "current_step": "phase1.garmin_email",
+            "profile_created": False,
+            "phase1": {},
+            "phase2": {},
+            "phase3": {},
+            "phase2_status": "pending",
+            "phase3_status": "pending",
+        }
+
+    def _normalize_progress(self, payload: dict[str, Any] | None) -> dict[str, Any]:
+        progress = self._default_progress()
+        if not payload:
+            return progress
+        if "schema_version" not in payload:
+            progress["phase1"] = dict(payload)
+            if payload.get("garmin_connected"):
+                progress["current_step"] = "phase1.target_event"
+            return progress
+        progress.update(
+            {
+                "schema_version": payload.get("schema_version", 2),
+                "status": payload.get("status", "in_progress"),
+                "current_step": payload.get("current_step", "phase1.garmin_email"),
+                "profile_created": bool(payload.get("profile_created")),
+                "phase2_status": payload.get("phase2_status", "pending"),
+                "phase3_status": payload.get("phase3_status", "pending"),
+            }
+        )
+        for section in ("phase1", "phase2", "phase3"):
+            progress[section] = dict(payload.get(section, {}))
+        return progress
+
+    def _write_progress(self, path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+        path.chmod(0o600)
+
+    async def has_profile(self, user_id: str) -> bool:
+        return self._load(user_id) is not None
+
+    async def summarize_profile(self, user_id: str) -> str:
+        profile = self._load(user_id)
+        if not profile:
+            return "먼저 /start 로 기본 설정을 완료해주세요."
+        return (
+            f"👋 이미 설정이 완료되어 있어요.\n"
+            f"이름: {profile.profile.name}\n"
+            f"Garmin 연결: {'완료' if profile.garmin.connected else '미완료'}\n"
+            f"목표: {profile.profile.goal_event or '미설정'}\n"
+            f"훈련 가능일: 주 {profile.profile.available_days}일\n\n"
+            f"세부 설정은 /settings, 목표 변경은 /goals 에서 계속할 수 있어요."
+        )
+
+    async def connect_garmin(self, user_id: str, email: str, password: str) -> bool:
+        with _scoped_garth_home(user_id):
+            return GarminAdapter().authenticate({"email": email, "password": password})
+
+    async def create_profile(self, user_id: str, payload: dict[str, Any]) -> str:
+        from garmin_coach.profile_manager import (
+            AICoachConfig,
+            FitnessData,
+            FitnessLevel,
+            GarminConfig,
+            MedicalConfig,
+            NutritionPreferences,
+            ProfileData,
+            ScheduleConfig,
+            Sex,
+            SleepConfig,
+            Sport,
+            UserPreferences,
+            UserProfile,
+        )
+
+        profile = UserProfile(
+            profile=ProfileData(
+                name=payload["name"],
+                age=int(payload["age"]),
+                sex=Sex(payload["sex"]),
+                height_cm=float(payload["height_cm"]),
+                weight_kg=float(payload["weight_kg"]),
+                sports=[Sport(value) for value in payload.get("sports", ["running"])],
+                goal_event=payload.get("goal_event", ""),
+                goal_date=payload.get("goal_date", ""),
+                fitness_level=FitnessLevel(payload.get("fitness_level", "intermediate")),
+                available_days=int(payload.get("available_days", 4)),
+            ),
+            fitness=FitnessData(),
+            garmin=GarminConfig(
+                email=payload.get("garmin_email") or None,
+                connected=bool(payload.get("garmin_connected")),
+            ),
+            schedule=ScheduleConfig(
+                morning_checkin={"enabled": True, "time": payload.get("morning_time", "06:00")},
+                evening_checkin={"enabled": True, "time": payload.get("evening_time", "22:00")},
+                weekly_review={"enabled": True, "day": "sunday", "time": "20:00"},
+            ),
+            ai_coach=AICoachConfig(enabled=False),
+            nutrition=NutritionPreferences(
+                weight_goal=payload.get("weight_goal", "maintain"),
+                dietary_style=payload.get("dietary_style", "omnivore"),
+                food_restrictions=list(payload.get("food_restrictions", [])),
+                allergies=list(payload.get("allergies", [])),
+                meal_pattern=payload.get("meal_pattern", ""),
+                supplements=list(payload.get("supplements", [])),
+                alcohol_frequency=payload.get("alcohol_frequency", ""),
+            ),
+            medical=MedicalConfig(
+                cardiac_conditions=list(payload.get("cardiac_conditions", [])),
+                hypertension=payload.get("hypertension", "none"),
+                diabetes=payload.get("diabetes", "none"),
+                respiratory=list(payload.get("respiratory", [])),
+                beta_blocker=bool(payload.get("beta_blocker", False)),
+                current_injuries=list(payload.get("current_injuries", [])),
+                notes=payload.get("medical_notes", ""),
+            ),
+            sleep=SleepConfig(
+                bedtime=payload.get("bedtime") or None,
+                wake_time=payload.get("wake_time") or None,
+                issues=list(payload.get("sleep_issues", [])),
+            ),
+            preferences=UserPreferences(
+                preferred_training_time=payload.get("preferred_training_time") or None,
+                cross_training_preferences=list(payload.get("cross_training_preferences", [])),
+                notification_frequency=payload.get("notification_frequency", "default"),
+                units=payload.get("units", "metric"),
+                timezone=payload.get("timezone", "Asia/Seoul"),
+                strava_connected=bool(payload.get("strava_connected", False)),
+            ),
+        )
+        self._save(user_id, profile)
+        sports = ", ".join(s.value for s in profile.profile.sports)
+        return (
+            f"✅ 온보딩이 완료되었어요.\n"
+            f"이름: {profile.profile.name}\n"
+            f"운동: {sports}\n"
+            f"Garmin 연결: {'완료' if profile.garmin.connected else '미완료'}\n"
+            f"목표: {profile.profile.goal_event or '미설정'}\n"
+            f"아침 브리핑: {profile.schedule.morning_checkin.get('time', '06:00')}\n"
+            f"저녁 체크인: {profile.schedule.evening_checkin.get('time', '22:00')}\n\n"
+            f"이제 /today, /week, /report 를 바로 사용할 수 있어요."
+        )
+
+    async def update_profile_sections(self, user_id: str, payload: dict[str, Any]) -> None:
+        def mutate(profile: Any) -> None:
+            medical = payload.get("medical") or {}
+            nutrition = payload.get("nutrition") or {}
+            sleep = payload.get("sleep") or {}
+            preferences = payload.get("preferences") or {}
+            if medical:
+                profile.medical.cardiac_conditions = list(medical.get("cardiac_conditions", []))
+                profile.medical.hypertension = medical.get("hypertension", "none")
+                profile.medical.diabetes = medical.get("diabetes", "none")
+                profile.medical.respiratory = list(medical.get("respiratory", []))
+                profile.medical.beta_blocker = bool(medical.get("beta_blocker", False))
+                profile.medical.current_injuries = list(medical.get("current_injuries", []))
+                profile.medical.notes = medical.get("notes", "")
+            if nutrition:
+                profile.nutrition.food_restrictions = list(
+                    nutrition.get("food_restrictions", profile.nutrition.food_restrictions)
+                )
+                profile.nutrition.allergies = list(
+                    nutrition.get("allergies", profile.nutrition.allergies)
+                )
+                profile.nutrition.meal_pattern = nutrition.get(
+                    "meal_pattern", profile.nutrition.meal_pattern
+                )
+                profile.nutrition.supplements = list(
+                    nutrition.get("supplements", profile.nutrition.supplements)
+                )
+                profile.nutrition.alcohol_frequency = nutrition.get(
+                    "alcohol_frequency", profile.nutrition.alcohol_frequency
+                )
+            if sleep:
+                profile.sleep.bedtime = sleep.get("bedtime") or None
+                profile.sleep.wake_time = sleep.get("wake_time") or None
+                profile.sleep.issues = list(sleep.get("issues", []))
+            if preferences:
+                profile.preferences.preferred_training_time = (
+                    preferences.get("preferred_training_time") or None
+                )
+                profile.preferences.cross_training_preferences = list(
+                    preferences.get(
+                        "cross_training_preferences",
+                        profile.preferences.cross_training_preferences,
+                    )
+                )
+                profile.preferences.notification_frequency = preferences.get(
+                    "notification_frequency", profile.preferences.notification_frequency
+                )
+                profile.preferences.units = preferences.get("units", profile.preferences.units)
+                profile.preferences.timezone = preferences.get(
+                    "timezone", profile.preferences.timezone
+                )
+                profile.preferences.strava_connected = bool(
+                    preferences.get("strava_connected", profile.preferences.strava_connected)
+                )
+                ai_tone = preferences.get("ai_tone")
+                if ai_tone:
+                    from garmin_coach.profile_manager import AITone
+
+                    profile.ai_coach.tone = AITone(ai_tone)
+
+        await self._mutate_profile(user_id, "onboarding_sections", mutate)
+
+    async def load_progress(self, user_id: str) -> dict[str, Any]:
+        path = self._progress_path(user_id)
+        if not path.exists():
+            return self._default_progress()
+        return self._normalize_progress(json.loads(path.read_text()))
+
+    async def save_progress(self, user_id: str, payload: dict[str, Any]) -> None:
+        self._write_progress(self._progress_path(user_id), self._normalize_progress(payload))
+
+    async def clear_progress(self, user_id: str) -> None:
+        path = self._progress_path(user_id)
+        if path.exists():
+            path.unlink()
+
+    async def summarize_settings(self, user_id: str) -> str:
+        profile = self._load(user_id)
+        return (
+            f"⚙️ 현재 설정\n"
+            f"이름: {profile.profile.name}\n"
+            f"체중: {profile.profile.weight_kg:.1f}kg\n"
+            f"아침 브리핑: {profile.schedule.morning_checkin.get('time', '06:00')}\n"
+            f"저녁 체크인: {profile.schedule.evening_checkin.get('time', '22:00')}\n"
+            f"영양 목표: {profile.nutrition.weight_goal}"
+        )
+
+    async def update_profile_name(self, user_id: str, value: str) -> None:
+        await self._mutate_profile(
+            user_id,
+            "profile",
+            lambda profile: setattr(profile.profile, "name", value.strip() or profile.profile.name),
+        )
+
+    async def update_weight(self, user_id: str, value: float) -> None:
+        await self._mutate_profile(
+            user_id,
+            "profile",
+            lambda profile: setattr(profile.profile, "weight_kg", value),
+        )
+
+    async def update_available_days(self, user_id: str, value: int) -> None:
+        await self._mutate_profile(
+            user_id,
+            "profile",
+            lambda profile: setattr(profile.profile, "available_days", value),
+        )
+
+    async def update_schedule(self, user_id: str, field: str, value: str) -> None:
+        def mutate(profile: Any) -> None:
+            if field == "morning":
+                profile.schedule.morning_checkin["time"] = value
+            else:
+                profile.schedule.evening_checkin["time"] = value
+
+        await self._mutate_profile(user_id, "schedule", mutate)
+
+    async def update_nutrition(self, user_id: str, weight_goal: str, dietary_style: str) -> None:
+        def mutate(profile: Any) -> None:
+            profile.nutrition.weight_goal = weight_goal
+            profile.nutrition.dietary_style = dietary_style
+
+        await self._mutate_profile(user_id, "nutrition", mutate)
+
+    async def update_medical(
+        self,
+        user_id: str,
+        beta_blocker: bool,
+        current_injuries: list[str],
+        notes: str,
+    ) -> None:
+        def mutate(profile: Any) -> None:
+            profile.medical.beta_blocker = beta_blocker
+            profile.medical.current_injuries = list(current_injuries)
+            profile.medical.notes = notes
+
+        await self._mutate_profile(user_id, "medical", mutate)
+
+    async def update_sleep(
+        self,
+        user_id: str,
+        bedtime: str,
+        wake_time: str,
+        issues: list[str],
+    ) -> None:
+        def mutate(profile: Any) -> None:
+            profile.sleep.bedtime = bedtime or None
+            profile.sleep.wake_time = wake_time or None
+            profile.sleep.issues = list(issues)
+
+        await self._mutate_profile(user_id, "sleep", mutate)
+
+    async def update_preferences(
+        self,
+        user_id: str,
+        preferred_training_time: str,
+        cross_training_preferences: list[str],
+        notification_frequency: str,
+        units: str,
+        timezone: str,
+        strava_connected: bool,
+    ) -> None:
+        def mutate(profile: Any) -> None:
+            profile.preferences.preferred_training_time = preferred_training_time or None
+            profile.preferences.cross_training_preferences = list(cross_training_preferences)
+            profile.preferences.notification_frequency = notification_frequency
+            profile.preferences.units = units
+            profile.preferences.timezone = timezone or profile.preferences.timezone
+            profile.preferences.strava_connected = strava_connected
+
+        await self._mutate_profile(user_id, "preferences", mutate)
+
+    async def update_ai_tone(self, user_id: str, tone: str) -> None:
+        from garmin_coach.profile_manager import AITone
+
+        await self._mutate_profile(
+            user_id,
+            "ai",
+            lambda profile: setattr(profile.ai_coach, "tone", AITone(tone)),
+        )
+
+    async def summarize_goals(self, user_id: str) -> str:
+        profile = self._load(user_id)
+        return (
+            f"🎯 현재 목표\n"
+            f"이벤트: {profile.profile.goal_event or '미설정'}\n"
+            f"날짜: {profile.profile.goal_date or '미설정'}\n"
+            f"수준: {profile.profile.fitness_level.value}\n"
+            f"최대 훈련 시간: {profile.profile.max_weekly_hours:.1f}h"
+        )
+
+    async def update_goal_event(self, user_id: str, value: str) -> None:
+        await self._mutate_profile(
+            user_id,
+            "goal",
+            lambda profile: setattr(profile.profile, "goal_event", value),
+        )
+
+    async def update_goal_date(self, user_id: str, value: str) -> None:
+        await self._mutate_profile(
+            user_id,
+            "goal",
+            lambda profile: setattr(profile.profile, "goal_date", value),
+        )
+
+    async def update_fitness_level(self, user_id: str, value: str) -> None:
+        from garmin_coach.profile_manager import FitnessLevel
+
+        await self._mutate_profile(
+            user_id,
+            "goal",
+            lambda profile: setattr(profile.profile, "fitness_level", FitnessLevel(value)),
+        )
+
+    async def update_max_weekly_hours(self, user_id: str, value: float) -> None:
+        await self._mutate_profile(
+            user_id,
+            "goal",
+            lambda profile: setattr(profile.profile, "max_weekly_hours", value),
+        )
+
+    async def get_schedule_config(self, user_id: str) -> dict[str, Any]:
+        profile = self._load(user_id)
+        timezone = "Asia/Seoul"
+        config_path = self._manager(user_id).config_path
+        if config_path.exists():
+            raw = yaml.safe_load(config_path.read_text()) or {}
+            timezone = raw.get("preferences", {}).get("timezone") or raw.get("timezone") or timezone
+        if not profile:
+            return {"morning_time": "07:00", "evening_time": "21:00", "timezone": timezone}
+        return {
+            "morning_time": profile.schedule.morning_checkin.get("time", "07:00"),
+            "evening_time": profile.schedule.evening_checkin.get("time", "21:00"),
+            "weekly_time": profile.schedule.weekly_review.get("time", "20:00"),
+            "weekly_day": profile.schedule.weekly_review.get("day", "sunday"),
+            "monthly_time": "09:00",
+            "timezone": profile.preferences.timezone or timezone,
+        }
+
+
+def _build_flow_registry(
+    adapter: TelegramAdapter, bridge: _RuntimeDataBridge, database: GarminCoachDatabase
+) -> _FlowRegistry:
+    profile_service = bridge.profile_service
+    morning_state = _MorningPlanStateStore()
+    feedback_service = _FeedbackStore(adapter, database)
+    nutrition_store = _NutritionStore(database)
+    food_analyzer = _FoodPhotoAnalyzer(profile_service)
     nutrition_flow = NutritionLogFlow(
         port=adapter,
-        storage=None,
-        nutrition_guide=_NutritionGuideProvider(),
+        photo_analyzer=food_analyzer,
+        storage=nutrition_store,
+        nutrition_guide=_NutritionGuideProvider(bridge),
     )
     return _FlowRegistry(
         morning_briefing=MorningBriefingFlow(
             port=adapter,
-            readiness=_ReadinessProvider(),
-            coaching=_DailyCoachingProvider(),
-            nutrition=None,
+            readiness=_ReadinessProvider(bridge),
+            coaching=_DailyCoachingProvider(bridge, morning_state),
+            nutrition=_PreWorkoutNutritionProvider(bridge),
+            plan_state=morning_state,
         ),
         post_workout=PostWorkoutFlow(
             port=adapter,
-            analyzer=_WorkoutAnalyzer(),
-            recovery_fuel=_RecoveryFuelProvider(),
-            feedback_agg=None,
+            analyzer=_WorkoutAnalyzer(bridge),
+            recovery_fuel=_RecoveryFuelProvider(bridge),
+            feedback_agg=feedback_service,
         ),
         evening_checkin=EveningCheckinFlow(
             port=adapter,
-            summary_provider=_DailySummaryProvider(),
-            tomorrow_plan=_TomorrowPlanProvider(),
+            summary_provider=_DailySummaryProvider(bridge),
+            tomorrow_plan=_TomorrowPlanProvider(bridge, profile_service, morning_state),
         ),
         nutrition_log=nutrition_flow,
         injury_report=InjuryReportFlow(
@@ -416,22 +1425,15 @@ def _build_flow_registry(adapter: TelegramAdapter) -> _FlowRegistry:
             injury_storage=_InjuryStorage(),
             guardrail_notifier=_GuardrailNotifier(),
         ),
-        onboarding=_MessageOnlyFlow(
-            adapter,
-            "👋 Telegram에서는 현재 설정 안내만 제공해요. 초기 설정은 CLI에서 `garmin-coach`를 실행한 뒤 다시 /today 로 시작해주세요.",
-        ),
-        settings=_MessageOnlyFlow(
-            adapter,
-            "⚙️ 설정 변경 UI는 아직 다른 스트림에서 마무리 중이에요. 현재는 `garmin-coach` CLI로 설정을 수정한 뒤 Telegram에서 다시 사용해주세요.",
-        ),
-        goals=_MessageOnlyFlow(
-            adapter,
-            "🎯 목표 수정 UI는 아직 다른 스트림과 통합 중이에요. 현재는 CLI 설정을 이용해주세요.",
-        ),
+        onboarding=OnboardingFlow(adapter, onboarding_service=profile_service),
+        settings=SettingsFlow(adapter, settings_service=profile_service),
+        goals=GoalsFlow(adapter, goals_service=profile_service),
     )
 
 
-def _set_bot_commands(app: Any) -> None:
+def _set_bot_commands(
+    app: Any, scheduler: TelegramScheduler, registry: TelegramUserRegistry
+) -> None:
     async def _post_init(application: Any) -> None:
         telegram, _ = _load_telegram_modules()
         commands = [
@@ -447,6 +1449,8 @@ def _set_bot_commands(app: Any) -> None:
             telegram.BotCommand("help", "도움말"),
         ]
         await application.bot.set_my_commands(commands)
+        for user_id in await registry.get_all_user_ids():
+            await scheduler.schedule_for_user(user_id)
 
     app.post_init = _post_init
 
@@ -496,32 +1500,67 @@ def build_telegram_application(
 
     runtime_adapter = adapter or TelegramAdapter(app.bot)
     registry = TelegramUserRegistry()
-    flow_registry = _build_flow_registry(runtime_adapter)
-    report_service = _RuntimeReportService()
+    profile_service = _UserProfileService()
+    database = GarminCoachDatabase(RUNTIME_DB)
+    bridge = _RuntimeDataBridge(profile_service, database)
+    flow_registry = _build_flow_registry(runtime_adapter, bridge, database)
+    report_service = _RuntimeReportService(bridge)
+    feedback_service = _FeedbackStore(runtime_adapter, database)
+    actual_bus = sync_bus or SyncEventBus()
     runtime_handlers = handlers or TelegramHandlers(
         runtime_adapter,
         flows=flow_registry,
-        engine=_RuntimeEngineProxy(),
+        engine=_RuntimeEngineProxy(bridge),
         reports=report_service,
-        feedback=_ManualFeedbackCollector(runtime_adapter),
-        photo_router=_PhotoRouter(),
+        feedback=feedback_service,
+        photo_router=_PhotoRouter(bridge),
         user_registry=registry,
     )
     runtime_scheduler = scheduler or TelegramScheduler(
         flow_registry,
-        user_config=_ScheduleConfigProvider(registry),
+        user_config=_ScheduleConfigProvider(registry, profile_service),
         delivery=runtime_adapter,
         reports=report_service,
+        locker=runtime_adapter,
     )
+    guardrail_notifier = _GuardrailNotifier()
+
+    async def _profile_side_effect(user_id: str, change_kind: str, profile: Any) -> None:
+        if change_kind in {"schedule", "preferences", "onboarding_sections"} and (
+            change_kind != "onboarding_sections"
+            or bool(profile.preferences.timezone or profile.preferences.preferred_training_time)
+        ):
+            await runtime_scheduler.schedule_for_user(user_id)
+            return
+        if change_kind in {"medical", "onboarding_sections"}:
+            await guardrail_notifier.on_profile_updated(user_id, profile)
+
+    set_side_effect = getattr(profile_service, "set_settings_side_effect", None)
+    if callable(set_side_effect):
+        set_side_effect(_profile_side_effect)
+
+    async def _activity_sync_job(context: Any) -> None:
+        for user_id in await registry.get_all_user_ids():
+            with _scoped_garth_home(user_id):
+                service = GarminSyncService(
+                    GarminAdapter(), database, bus=actual_bus, user_id=user_id
+                )
+                service.sync_recent_activities()
+                service.sync_daily_health()
 
     runtime_handlers.register(app)
     runtime_scheduler.setup(app.job_queue)
-    _set_bot_commands(app)
-    _bind_sync_bus(app, runtime_scheduler, sync_bus or SyncEventBus())
+    if hasattr(app.job_queue, "run_repeating"):
+        app.job_queue.run_repeating(
+            _activity_sync_job, interval=900, first=10, name="activity_sync"
+        )
+    _set_bot_commands(app, runtime_scheduler, registry)
+    _bind_sync_bus(app, runtime_scheduler, actual_bus)
 
     app.bot_data["stream2_adapter"] = runtime_adapter
     app.bot_data["stream2_handlers"] = runtime_handlers
     app.bot_data["stream2_scheduler"] = runtime_scheduler
+    app.bot_data["stream2_sync_bus"] = actual_bus
     return app
 
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .feedback import FeedbackSummary
+
 
 @dataclass
 class WeeklyReportSummary:
@@ -58,6 +60,8 @@ class WeeklyReport:
     summary: WeeklyReportSummary
     training_load: WeeklyTrainingLoadSummary | None = None
     recovery: WeeklyRecoverySummary | None = None
+    feedback: FeedbackSummary | None = None
+    missing_data_notes: list[str] | None = None
     coach_comment: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -66,5 +70,7 @@ class WeeklyReport:
             "summary": self.summary.to_dict(),
             "training_load": self.training_load.to_dict() if self.training_load else None,
             "recovery": self.recovery.to_dict() if self.recovery else None,
+            "feedback": self.feedback.to_dict() if self.feedback else None,
+            "missing_data_notes": list(self.missing_data_notes or []),
             "coach_comment": self.coach_comment,
         }

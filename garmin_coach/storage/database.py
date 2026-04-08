@@ -148,6 +148,13 @@ class GarminCoachDatabase:
         ).fetchone()
         return json.loads(row[0]) if row else None
 
+    def list_recent_activities(self, user_id: str, limit: int = 7) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT payload FROM activities WHERE user_id = ? ORDER BY activity_date DESC LIMIT ?",
+            (user_id, limit),
+        ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
     def save_training_load(self, user_id: str, metric_date: str, payload: dict[str, Any]) -> None:
         self.conn.execute(
             "INSERT INTO training_load(user_id, date, payload) VALUES (?, ?, ?) ON CONFLICT(user_id, date) DO UPDATE SET payload=excluded.payload",
@@ -176,6 +183,13 @@ class GarminCoachDatabase:
         ).fetchone()
         return json.loads(row[0]) if row else None
 
+    def list_recent_daily_health(self, user_id: str, limit: int = 7) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT payload FROM daily_health WHERE user_id = ? ORDER BY date DESC LIMIT ?",
+            (user_id, limit),
+        ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
     def save_feedback(
         self, user_id: str, feedback_id: str, activity_date: str, payload: dict[str, Any]
     ) -> None:
@@ -185,6 +199,36 @@ class GarminCoachDatabase:
         )
         self.conn.commit()
 
+    def load_feedback(self, user_id: str, feedback_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT payload FROM feedback WHERE user_id = ? AND feedback_id = ?",
+            (user_id, feedback_id),
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def list_feedback(
+        self,
+        user_id: str,
+        *,
+        limit: int | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses = ["user_id = ?"]
+        params: list[Any] = [user_id]
+        if start_date is not None:
+            clauses.append("activity_date >= ?")
+            params.append(start_date)
+        if end_date is not None:
+            clauses.append("activity_date <= ?")
+            params.append(end_date)
+        sql = f"SELECT payload FROM feedback WHERE {' AND '.join(clauses)} ORDER BY activity_date DESC, feedback_id DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        rows = self.conn.execute(sql, params).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
     def save_nutrition_log(
         self, user_id: str, entry_id: str, entry_date: str, payload: dict[str, Any]
     ) -> None:
@@ -193,6 +237,20 @@ class GarminCoachDatabase:
             (user_id, entry_id, entry_date, self._serialize_payload(payload)),
         )
         self.conn.commit()
+
+    def load_nutrition_log(self, user_id: str, entry_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT payload FROM nutrition_log WHERE user_id = ? AND entry_id = ?",
+            (user_id, entry_id),
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def list_recent_nutrition_logs(self, user_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT payload FROM nutrition_log WHERE user_id = ? ORDER BY entry_date DESC, entry_id DESC LIMIT ?",
+            (user_id, limit),
+        ).fetchall()
+        return [json.loads(row[0]) for row in rows]
 
     def close(self) -> None:
         self.conn.close()

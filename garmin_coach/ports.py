@@ -17,9 +17,11 @@ from typing import Any
 # Supporting data types
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class Button:
     """A single action button presented to the user."""
+
     label: str
     callback_data: str
 
@@ -27,6 +29,7 @@ class Button:
 @dataclass
 class Option:
     """A selectable option (used in single/multi-select prompts)."""
+
     label: str
     value: str
     emoji: str | None = None
@@ -41,9 +44,23 @@ class InputType(Enum):
     PHOTO = "photo"
 
 
+class InputAbortReason(Enum):
+    TIMEOUT = "timeout"
+    CANCELLED = "cancelled"
+    SKIPPED = "skipped"
+
+
+class InputAborted(Exception):
+    def __init__(self, input_type: InputType, reason: InputAbortReason):
+        self.input_type = input_type
+        self.reason = reason
+        super().__init__(f"{input_type.value}:{reason.value}")
+
+
 @dataclass
 class ReportSection:
     """One logical section of a report (text block or image)."""
+
     content_type: str  # "text" | "image"
     text: str | None = None
     image: bytes | None = None
@@ -53,6 +70,7 @@ class ReportSection:
 @dataclass
 class Report:
     """A structured report composed of multiple sections."""
+
     title: str
     sections: list[ReportSection] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -61,6 +79,7 @@ class Report:
 # ---------------------------------------------------------------------------
 # Abstract port
 # ---------------------------------------------------------------------------
+
 
 class CoachingPort(ABC):
     """Abstract interface that every delivery channel must implement.
@@ -149,4 +168,4 @@ class CoachingPort(ABC):
         user_id: str,
         prompt: str,
     ) -> bytes | None:
-        """Ask the user to send a photo. Returns None on timeout/skip."""
+        """Ask the user to send a photo."""

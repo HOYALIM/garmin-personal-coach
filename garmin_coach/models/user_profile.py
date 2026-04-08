@@ -15,7 +15,7 @@ class GarminAuth:
 
     def to_safe_dict(self) -> dict[str, Any]:
         return {
-            "email": self.email,
+            "email": _mask_email(self.email),
             "connected": self.connected,
             "connected_at": self.connected_at.isoformat() if self.connected_at else None,
             "mfa_enabled": self.mfa_enabled,
@@ -153,6 +153,35 @@ class UserProfile:
     def to_safe_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["garmin_credentials"] = self.garmin_credentials.to_safe_dict()
+        if self.medical:
+            payload["medical"] = {
+                "beta_blocker": self.medical.beta_blocker,
+                "cardiac_condition_count": len(self.medical.cardiac_conditions),
+                "current_injury_count": len(self.medical.current_injuries),
+                "has_notes": bool(self.medical.notes.strip()),
+            }
+        if self.nutrition:
+            payload["nutrition"] = {
+                "dietary_restriction_count": len(self.nutrition.dietary_restrictions),
+                "allergy_count": len(self.nutrition.allergies),
+                "supplement_count": len(self.nutrition.supplements),
+                "has_meal_pattern": bool(self.nutrition.meal_pattern.strip()),
+            }
+        if self.sleep:
+            payload["sleep"] = {
+                "has_bedtime": bool(self.sleep.bedtime),
+                "has_wake_time": bool(self.sleep.wake_time),
+                "issue_count": len(self.sleep.issues),
+            }
         if self.strava_auth:
             payload["strava_auth"] = self.strava_auth.to_safe_dict()
         return payload
+
+
+def _mask_email(value: str) -> str:
+    if "@" not in value:
+        return "***REDACTED***" if value else ""
+    local, domain = value.split("@", 1)
+    if not local:
+        return f"***@{domain}"
+    return f"{local[:1]}***@{domain}"

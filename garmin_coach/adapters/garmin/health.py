@@ -175,7 +175,17 @@ def parse_training_readiness(payload: dict[str, Any] | None) -> TrainingReadines
             level = "red"
         else:
             level = "critical"
-    return TrainingReadinessData(score=score, level=level, raw=payload)
+    return TrainingReadinessData(
+        score=score,
+        level=level,
+        recovery_time_hours=payload.get("recoveryTime") or payload.get("recoveryHours"),
+        acute_load=payload.get("acuteLoad") or payload.get("load"),
+        load_balance=payload.get("loadBalance") or payload.get("loadFocus"),
+        sleep_contribution=payload.get("sleepScoreContribution")
+        or payload.get("sleepContribution"),
+        hrv_contribution=payload.get("hrvContribution") or payload.get("hrvStatusContribution"),
+        raw=payload,
+    )
 
 
 def _parse_dt(value: Any) -> datetime | None:

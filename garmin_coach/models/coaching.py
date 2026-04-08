@@ -22,6 +22,7 @@ class DayPlan:
     session_type: SessionType
     description: str
     target_tss: float = 0.0
+    rationale: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -29,6 +30,7 @@ class DayPlan:
             "session_type": self.session_type.value,
             "description": self.description,
             "target_tss": self.target_tss,
+            "rationale": self.rationale,
         }
 
 
@@ -37,12 +39,14 @@ class WeeklyPlan:
     days: list[DayPlan] = field(default_factory=list)
     total_tss: float = 0.0
     notes: list[str] = field(default_factory=list)
+    focus: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return {
             "days": [day.to_dict() for day in self.days],
             "total_tss": self.total_tss,
             "notes": self.notes,
+            "focus": self.focus,
         }
 
 
@@ -53,6 +57,7 @@ class WorkoutAnalysis:
     comparison_to_recent: str = ""
     pace_drift: float | None = None
     coaching_notes: list[str] = field(default_factory=list)
+    recovery_recommendation: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -61,6 +66,7 @@ class WorkoutAnalysis:
             "comparison_to_recent": self.comparison_to_recent,
             "pace_drift": self.pace_drift,
             "coaching_notes": self.coaching_notes,
+            "recovery_recommendation": self.recovery_recommendation,
         }
 
 

@@ -85,6 +85,11 @@ class BodyCompositionData:
 class TrainingReadinessData:
     score: int | None = None
     level: str | None = None
+    recovery_time_hours: float | None = None
+    acute_load: float | None = None
+    load_balance: str | None = None
+    sleep_contribution: float | None = None
+    hrv_contribution: float | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -139,6 +144,8 @@ class ReadinessScore:
     component_weights: dict[str, float] = field(default_factory=dict)
     confidence: str = "high"
     reason: str = ""
+    input_snapshot: dict[str, float | int | None] = field(default_factory=dict)
+    limiting_factors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -148,6 +155,8 @@ class ReadinessScore:
             "component_weights": self.component_weights,
             "confidence": self.confidence,
             "reason": self.reason,
+            "input_snapshot": self.input_snapshot,
+            "limiting_factors": self.limiting_factors,
         }
 
 
