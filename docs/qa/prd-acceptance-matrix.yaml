@@ -1,0 +1,168 @@
+version: 1
+manual_qa_cases:
+  - id: qa-manual-001
+    title: Morning briefing readiness downgrade output
+    description: Verify morning briefing communicates readiness level, reason, and adjusted workout path.
+  - id: qa-manual-002
+    title: Post-workout nutrition and feedback loop
+    description: Verify workout summary, recovery nutrition, and subjective feedback prompts appear in order.
+  - id: qa-manual-003
+    title: Onboarding resume from saved step
+    description: Verify onboarding restarts from the last incomplete phase without duplicating Phase 1 prompts.
+  - id: qa-manual-004
+    title: Weekly report rendered for a realistic user
+    description: Verify weekly report reads coherently, preserves computed values, and includes next-step commentary.
+cases:
+  - id: prd-s1-guardrail-overtraining
+    stream: 1
+    prd_section: "8.3"
+    title: Overtraining guardrail overrides unsafe hard session
+    expected_outcome: "TSB below threshold and unsafe intensity must produce override/rest behavior."
+    automated_tests:
+      - tests/test_stream1_guardrails.py
+    manual_qa: []
+
+  - id: prd-s1-guardrail-injury-bodypart
+    stream: 1
+    prd_section: "8.3"
+    title: Active injury blocks related session loading
+    expected_outcome: "Current injury must override related session even without pending clearance or explicit restrictions."
+    automated_tests:
+      - tests/test_stream1_guardrails.py
+    manual_qa:
+      - qa-manual-002
+
+  - id: prd-s1-readiness-thresholds
+    stream: 1
+    prd_section: "3.2"
+    title: Readiness thresholds map to green/yellow/red/critical behavior
+    expected_outcome: "Readiness score must classify level correctly and support downgrade logic."
+    automated_tests:
+      - tests/test_stream1_models_and_readiness.py
+    manual_qa:
+      - qa-manual-001
+
+  - id: prd-s2-flow-isolation
+    stream: 2
+    prd_section: "10.1"
+    title: Flows remain Telegram-free
+    expected_outcome: "No flow module imports Telegram or concrete interface modules."
+    automated_tests:
+      - tests/test_stream2_telegram.py
+    manual_qa: []
+
+  - id: prd-s2-telegram-runtime
+    stream: 2
+    prd_section: "9"
+    title: Telegram runtime uses Stream 2 architecture
+    expected_outcome: "Actual runtime entrypoint must compose adapter, handlers, scheduler, and flow registry."
+    automated_tests:
+      - tests/test_stream2_telegram.py
+    manual_qa:
+      - qa-manual-002
+
+  - id: prd-s2-post-workout-trigger
+    stream: 2
+    prd_section: "6.2"
+    title: New activity triggers post-workout flow
+    expected_outcome: "Activity event path must invoke post-workout logic without violating per-user execution safety."
+    automated_tests:
+      - tests/test_stream2_telegram.py
+    manual_qa:
+      - qa-manual-002
+
+  - id: prd-s3-phase1-immediate-value
+    stream: 3
+    prd_section: "4.2"
+    title: Phase 1 completion allows immediate coaching start
+    expected_outcome: "Profile is usable after required onboarding even if later phases remain incomplete."
+    automated_tests:
+      - tests/test_stream3_onboarding_settings.py
+    manual_qa:
+      - qa-manual-003
+
+  - id: prd-s3-rehab-branching
+    stream: 3
+    prd_section: "4.2"
+    title: Rehab onboarding captures safety-critical restrictions
+    expected_outcome: "Rehab/injury onboarding must persist body part, clearance, and restrictions safely."
+    automated_tests:
+      - tests/test_stream3_onboarding_settings.py
+    manual_qa:
+      - qa-manual-003
+
+  - id: prd-s3-timeout-explicit
+    stream: 3
+    prd_section: "4.1"
+    title: Onboarding timeout remains explicit and resumable
+    expected_outcome: "Timeout/cancel must not become normal profile data and resume must continue from last incomplete step."
+    automated_tests:
+      - tests/test_stream3_onboarding_settings.py
+    manual_qa:
+      - qa-manual-003
+
+  - id: prd-s4-periodized-macros
+    stream: 4
+    prd_section: "5.2"
+    title: Daily macros follow session-type ranges and safety floors
+    expected_outcome: "Carb/protein/fat and kcal outputs must match PRD ranges without violating BMR/fat minimum safety."
+    automated_tests:
+      - tests/test_stream4_nutrition_contracts.py
+    manual_qa: []
+
+  - id: prd-s4-low-confidence-photo
+    stream: 4
+    prd_section: "5.3"
+    title: Low-confidence food photo stays non-authoritative
+    expected_outcome: "Food photo analysis with low confidence must require confirmation and avoid authoritative persistence."
+    automated_tests:
+      - tests/test_stream4_nutrition_contracts.py
+    manual_qa:
+      - qa-manual-002
+
+  - id: prd-s4-allergy-filtering
+    stream: 4
+    prd_section: "5.2"
+    title: Nutrition suggestions respect allergies and dietary restrictions
+    expected_outcome: "Examples and meal suggestions must never include banned foods."
+    automated_tests:
+      - tests/test_stream4_nutrition_contracts.py
+    manual_qa: []
+
+  - id: prd-s5-feedback-dedup
+    stream: 5
+    prd_section: "6.2"
+    title: Duplicate activity feedback is idempotent
+    expected_outcome: "Repeated events must not double-count pain, feedback, or guardrail side effects."
+    automated_tests:
+      - tests/test_stream5_feedback_reports.py
+    manual_qa: []
+
+  - id: prd-s5-partial-feedback-resume
+    stream: 5
+    prd_section: "6.2"
+    title: Partial feedback resumes safely after timeout
+    expected_outcome: "Timeout must preserve partial answers and merge resumed answers without fake defaults."
+    automated_tests:
+      - tests/test_stream5_feedback_reports.py
+    manual_qa:
+      - qa-manual-002
+
+  - id: prd-s5-report-determinism
+    stream: 5
+    prd_section: "7"
+    title: Weekly report is deterministic and data-driven
+    expected_outcome: "Same stored inputs must yield identical report values, with no fabricated metrics on missing data."
+    automated_tests:
+      - tests/test_stream5_feedback_reports.py
+    manual_qa:
+      - qa-manual-004
+
+  - id: prd-s5-workout-food-photo-separation
+    stream: 5
+    prd_section: "6.3"
+    title: Workout photo and food photo paths stay separate
+    expected_outcome: "Workout screenshots and food photos must be routed to separate analyzers without cross-contamination."
+    automated_tests:
+      - tests/test_stream5_feedback_reports.py
+    manual_qa: []
