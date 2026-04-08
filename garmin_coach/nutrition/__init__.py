@@ -1,5 +1,18 @@
-from typing import Optional
 from dataclasses import dataclass
+
+from .engine import DailyNutritionGuide, NutritionEngine
+from .hydration import HydrationPlan, calculate_sweat_rate, get_hydration_plan
+from .macros import DailyMacros, calculate_daily_macros
+from .photo_food import EstimatedMacros, FoodAnalysis, FoodPhotoAnalyzer
+from .recovery_fuel import RecoveryAdvice, get_recovery_advice
+from .timing import (
+    DuringWorkoutAdvice,
+    PostWorkoutAdvice,
+    PreWorkoutAdvice,
+    get_during_advice,
+    get_post_workout_advice,
+    get_pre_workout_advice,
+)
 
 
 @dataclass
@@ -12,18 +25,14 @@ class NutritionTargets:
     sodium_mg: int
 
 
-def calculate_basal_metabolic_rate(
-    weight_kg: float, height_cm: int, age: int, sex: str
-) -> float:
+def calculate_basal_metabolic_rate(weight_kg: float, height_cm: int, age: int, sex: str) -> float:
     if sex.lower() == "male":
         return 10 * weight_kg + 6.25 * height_cm - 5 * age + 5
     else:
         return 10 * weight_kg + 6.25 * height_cm - 5 * age - 161
 
 
-def calculate_total_daily_energy_expenditure(
-    bmr: float, activity_level: str = "moderate"
-) -> float:
+def calculate_total_daily_energy_expenditure(bmr: float, activity_level: str = "moderate") -> float:
     multipliers = {
         "sedentary": 1.2,
         "light": 1.375,
@@ -34,9 +43,7 @@ def calculate_total_daily_energy_expenditure(
     return bmr * multipliers.get(activity_level.lower(), 1.55)
 
 
-def calculate_activity_calories(
-    sport: str, duration_minutes: int, weight_kg: float
-) -> int:
+def calculate_activity_calories(sport: str, duration_minutes: int, weight_kg: float) -> int:
     calories_per_kg_per_min = {
         "running": 0.12,
         "cycling": 0.08,
@@ -162,9 +169,7 @@ def recommend_pre_workout(sport: str, duration_minutes: int) -> dict:
 
 def recommend_post_workout(sport: str, duration_minutes: int) -> dict:
     protein_recommendation = 20 if duration_minutes < 60 else 30
-    carbs_recommendation = (
-        min(1.5, 0.5 + duration_minutes / 120) if duration_minutes > 45 else 0.5
-    )
+    carbs_recommendation = min(1.5, 0.5 + duration_minutes / 120) if duration_minutes > 45 else 0.5
 
     return {
         "timing": "Within 30-60 minutes",
@@ -178,3 +183,33 @@ def recommend_post_workout(sport: str, duration_minutes: int) -> dict:
             "Chicken with rice",
         ],
     }
+
+
+__all__ = [
+    "DailyMacros",
+    "DailyNutritionGuide",
+    "DuringWorkoutAdvice",
+    "EstimatedMacros",
+    "FoodAnalysis",
+    "FoodPhotoAnalyzer",
+    "HydrationPlan",
+    "NutritionEngine",
+    "NutritionTargets",
+    "PostWorkoutAdvice",
+    "PreWorkoutAdvice",
+    "RecoveryAdvice",
+    "calculate_activity_calories",
+    "calculate_basal_metabolic_rate",
+    "calculate_daily_macros",
+    "calculate_hydration",
+    "calculate_nutrition_targets",
+    "calculate_sweat_rate",
+    "calculate_total_daily_energy_expenditure",
+    "get_during_advice",
+    "get_hydration_plan",
+    "get_post_workout_advice",
+    "get_pre_workout_advice",
+    "get_recovery_advice",
+    "recommend_post_workout",
+    "recommend_pre_workout",
+]

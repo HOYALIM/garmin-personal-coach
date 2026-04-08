@@ -1,4 +1,4 @@
-"""Structured data models for Garmin Personal Coach."""
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -136,35 +136,8 @@ class MorningResult:
             lines.append(f"  - {item}")
         lines.append(f"- {self.pace_hr_guidance}")
         lines.append(f"- {self.downgrade_rule}")
-        lines.append(
-            f"- [{'PRECHECK' if self.phase == Phase.PRECHECK else 'FINAL CALL'}]"
-        )
+        lines.append(f"- [{'PRECHECK' if self.phase == Phase.PRECHECK else 'FINAL CALL'}]")
         return "\n".join(lines)
-
-
-@dataclass
-class ActivitySummary:
-    activity_id: str | None = None
-    type: str | None = None
-    start_time: str | None = None
-    distance_km: float | None = None
-    duration_min: float | None = None
-    avg_pace: str | None = None
-    avg_hr: int | None = None
-    calories: int | None = None
-    training_effect: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "type": self.type,
-            "start_time": self.start_time,
-            "distance_km": self.distance_km,
-            "duration_min": self.duration_min,
-            "avg_pace": self.avg_pace,
-            "avg_hr": self.avg_hr,
-            "calories": self.calories,
-            "training_effect": self.training_effect,
-        }
 
 
 @dataclass
@@ -190,12 +163,12 @@ class WorkoutLog:
     date: str
     planned: str | None = None
     final_status: str | None = None
-    activity: ActivitySummary | None = None
+    activity: Any | None = None
     completed: str | None = None
     subjective: SubjectiveRating | None = None
     coach_note: str = ""
     tomorrow_note: str = ""
-    source: str = "unknown"  # garmin | manual | strava | unknown
+    source: str = "unknown"
     synced: dict[str, bool] = field(
         default_factory=lambda: {
             "markdown": False,
@@ -210,7 +183,9 @@ class WorkoutLog:
             "date": self.date,
             "planned": self.planned,
             "final_status": self.final_status,
-            "activity": self.activity.to_dict() if self.activity else None,
+            "activity": self.activity.to_dict()
+            if self.activity and hasattr(self.activity, "to_dict")
+            else self.activity,
             "completed": self.completed,
             "subjective": self.subjective.to_dict() if self.subjective else None,
             "coach_note": self.coach_note,

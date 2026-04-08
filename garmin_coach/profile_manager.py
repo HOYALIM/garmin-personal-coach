@@ -217,6 +217,10 @@ class NutritionPreferences:
     weight_goal: str = "maintain"  # "maintain", "lose", "gain"
     dietary_style: str = "omnivore"  # "omnivore", "vegetarian", "vegan", "other"
     food_restrictions: list[str] = field(default_factory=list)
+    allergies: list[str] = field(default_factory=list)
+    meal_pattern: str = ""
+    supplements: list[str] = field(default_factory=list)
+    alcohol_frequency: str = ""
     coaching_style: str = "brief"  # "brief", "detailed", "macros"
 
     def to_dict(self) -> dict[str, Any]:
@@ -258,6 +262,55 @@ class AICoachConfig:
 
 
 @dataclass
+class MedicalConfig:
+    cardiac_conditions: list[str] = field(default_factory=list)
+    hypertension: str = "none"
+    diabetes: str = "none"
+    respiratory: list[str] = field(default_factory=list)
+    beta_blocker: bool = False
+    current_injuries: list[str] = field(default_factory=list)
+    notes: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "MedicalConfig":
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class SleepConfig:
+    bedtime: str | None = None
+    wake_time: str | None = None
+    issues: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "SleepConfig":
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class UserPreferences:
+    preferred_training_time: str | None = None
+    cross_training_preferences: list[str] = field(default_factory=list)
+    notification_frequency: str = "default"
+    units: str = "metric"
+    timezone: str = "Asia/Seoul"
+    strava_connected: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "UserPreferences":
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
 class UserProfile:
     """Full user profile container."""
 
@@ -267,6 +320,9 @@ class UserProfile:
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     ai_coach: AICoachConfig = field(default_factory=AICoachConfig)
     nutrition: NutritionPreferences = field(default_factory=NutritionPreferences)
+    medical: MedicalConfig = field(default_factory=MedicalConfig)
+    sleep: SleepConfig = field(default_factory=SleepConfig)
+    preferences: UserPreferences = field(default_factory=UserPreferences)
     version: str = "1.0"
     created_at: str | None = None
     updated_at: str | None = None
@@ -282,6 +338,9 @@ class UserProfile:
             "schedule": self.schedule.to_dict(),
             "ai_coach": self.ai_coach.to_dict(),
             "nutrition": self.nutrition.to_dict(),
+            "medical": self.medical.to_dict(),
+            "sleep": self.sleep.to_dict(),
+            "preferences": self.preferences.to_dict(),
         }
 
     @classmethod
@@ -297,6 +356,9 @@ class UserProfile:
             schedule=ScheduleConfig.from_dict(d.get("schedule", {})),
             ai_coach=AICoachConfig.from_dict(d.get("ai_coach", {})),
             nutrition=NutritionPreferences.from_dict(d.get("nutrition", {})),
+            medical=MedicalConfig.from_dict(d.get("medical", {})),
+            sleep=SleepConfig.from_dict(d.get("sleep", {})),
+            preferences=UserPreferences.from_dict(d.get("preferences", {})),
         )
 
 
@@ -492,6 +554,17 @@ class ProfileManager:
             "sunday",
         ]:
             errors.append(f"schedule.weekly_review.day must be day name, got {wr.get('day')!r}")
+
+        if user_profile.sleep.bedtime and not _validate_time(user_profile.sleep.bedtime):
+            errors.append(f"sleep.bedtime must be HH:MM, got {user_profile.sleep.bedtime!r}")
+        if user_profile.sleep.wake_time and not _validate_time(user_profile.sleep.wake_time):
+            errors.append(f"sleep.wake_time must be HH:MM, got {user_profile.sleep.wake_time!r}")
+        if user_profile.preferences.units not in {"metric", "imperial"}:
+            errors.append(
+                f"preferences.units must be metric/imperial, got {user_profile.preferences.units!r}"
+            )
+        if not (user_profile.preferences.timezone or "").strip():
+            errors.append("preferences.timezone is required")
 
         return errors
 

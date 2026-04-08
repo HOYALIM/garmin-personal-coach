@@ -1,10 +1,17 @@
 """Garmin data fetching layer (garth adapter)."""
 
 import os
+import warnings
 from datetime import date, datetime
 from typing import Any
 
-import garth
+with warnings.catch_warnings():
+    warnings.filterwarnings(
+        "ignore",
+        category=DeprecationWarning,
+        message=r"Garth is deprecated and no longer maintained.*",
+    )
+    import garth
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from garmin_coach.logging_config import log_error, log_warning
