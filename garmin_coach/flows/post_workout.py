@@ -259,6 +259,18 @@ class PostWorkoutFlow:
         if parts:
             lines.append("- " + " | ".join(parts))
 
+        zone_distribution = self._value(analysis, "zone_distribution") or self._value(
+            activity, "zone_distribution"
+        )
+        if isinstance(zone_distribution, dict) and zone_distribution:
+            preferred = None
+            if "Zone 4" in zone_distribution:
+                preferred = ("Zone 4", zone_distribution["Zone 4"])
+            elif "z4" in zone_distribution:
+                preferred = ("Zone 4", zone_distribution["z4"])
+            if preferred is not None:
+                lines.append(f"- {preferred[0]}: {preferred[1]}%")
+
         # Analysis details from S5
         tss = self._value(analysis, "tss")
         if tss is None:
