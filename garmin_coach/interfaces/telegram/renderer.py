@@ -167,6 +167,9 @@ def _render_periodic_report(report: dict[str, Any], title: str, summary_label: s
         total_time = s.get("total_time")
         if total_time:
             summary_lines.append(f"총 시간: {total_time}")
+        avg_pace = s.get("average_pace")
+        if avg_pace:
+            summary_lines.append(f"평균 페이스: {avg_pace}")
 
     # Training load
     load = report.get("training_load", {})
@@ -174,14 +177,26 @@ def _render_periodic_report(report: dict[str, Any], title: str, summary_label: s
         summary_lines.append("\n📈 트레이닝 로드:")
         ctl = load.get("ctl")
         if ctl is not None:
-            summary_lines.append(f"- CTL: {ctl:.1f}")
+            ctl_start = load.get("ctl_start")
+            if ctl_start is not None:
+                summary_lines.append(f"- CTL: {ctl_start:.1f} → {ctl:.1f} ({ctl - ctl_start:+.1f})")
+            else:
+                summary_lines.append(f"- CTL: {ctl:.1f}")
         atl = load.get("atl")
         if atl is not None:
-            summary_lines.append(f"- ATL: {atl:.1f}")
+            atl_start = load.get("atl_start")
+            if atl_start is not None:
+                summary_lines.append(f"- ATL: {atl_start:.1f} → {atl:.1f} ({atl - atl_start:+.1f})")
+            else:
+                summary_lines.append(f"- ATL: {atl:.1f}")
         tsb = load.get("tsb")
         if tsb is not None:
             emoji = "🟢" if tsb > -10 else ("🟡" if tsb > -25 else "🔴")
-            summary_lines.append(f"- TSB: {tsb:.1f} {emoji}")
+            tsb_start = load.get("tsb_start")
+            if tsb_start is not None:
+                summary_lines.append(f"- TSB: {tsb_start:.1f} → {tsb:.1f} {emoji}")
+            else:
+                summary_lines.append(f"- TSB: {tsb:.1f} {emoji}")
         ramp = load.get("ramp_rate")
         if ramp is not None:
             ok = "✅" if ramp <= 5 else "⚠️"
@@ -207,6 +222,21 @@ def _render_periodic_report(report: dict[str, Any], title: str, summary_label: s
             rec_lines.append(f"- Body Battery 평균: {bb}/100")
         messages.append("\n".join(rec_lines))
 
+    nutrition = report.get("nutrition", {})
+    if nutrition:
+        nutrition_lines = ["🍽️ 영양:"]
+        logged = nutrition.get("logged_meals")
+        if logged:
+            nutrition_lines.append(f"- 기록된 식사: {logged}")
+        protein = nutrition.get("avg_protein")
+        if protein:
+            nutrition_lines.append(f"- 추정 일일 단백질: {protein}")
+        hydration = nutrition.get("hydration_response")
+        if hydration:
+            nutrition_lines.append(f"- 수분 섭취 알림 응답률: {hydration}")
+        if len(nutrition_lines) > 1:
+            messages.append("\n".join(nutrition_lines))
+
     feedback = report.get("feedback", {})
     if feedback:
         feedback_lines = ["📝 피드백 요약:"]
@@ -215,7 +245,11 @@ def _render_periodic_report(report: dict[str, Any], title: str, summary_label: s
             feedback_lines.append(f"- 평균 RPE: {avg_rpe}")
         pain_reports = feedback.get("pain_reports")
         if pain_reports:
-            feedback_lines.append(f"- 통증 보고: {pain_reports}회")
+            suffix = "회" if isinstance(pain_reports, (int, float)) else ""
+            feedback_lines.append(f"- 통증 보고: {pain_reports}{suffix}")
+        pace_achievement = feedback.get("pace_achievement")
+        if pace_achievement:
+            feedback_lines.append(f"- 목표 페이스 달성률: {pace_achievement}")
         partial = feedback.get("partial_feedbacks")
         skipped = feedback.get("skipped_feedbacks")
         if partial:
@@ -236,6 +270,10 @@ def _render_periodic_report(report: dict[str, Any], title: str, summary_label: s
         messages.append("\n".join(missing_lines))
 
     # Coach comment
+    next_week_plan = report.get("next_week_plan")
+    if next_week_plan:
+        messages.append(f"🎯 다음 주 계획:\n━━━━━━━━━━━━━━━━━━\n{next_week_plan}")
+
     comment = report.get("coach_comment")
     if comment:
         messages.append(f"💡 코치 코멘트:\n> {comment}")

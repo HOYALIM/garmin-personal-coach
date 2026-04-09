@@ -161,19 +161,41 @@ class MorningBriefingFlow:
         # Health component details
         components = self._value(readiness, "components", {})
         if components:
-            if "sleep_score" in components:
+            sleep_duration = self._value(readiness, "sleep_duration") or components.get(
+                "sleep_duration"
+            )
+            if sleep_duration:
+                sleep_score = components.get("sleep_score")
+                suffix = f" (Score: {sleep_score})" if sleep_score is not None else ""
+                quality = "✅" if sleep_score is not None and sleep_score >= 70 else "⚠️"
+                lines.append(f"- 수면: {sleep_duration}{suffix} {quality}")
+            elif "sleep_score" in components:
                 v = components["sleep_score"]
                 lines.append(f"- 수면: {v} {'✅' if v and v >= 70 else '⚠️'}")
+
+            hrv_value = self._value(readiness, "hrv_value") or components.get("hrv_value")
+            hrv_baseline = self._value(readiness, "hrv_baseline") or components.get("hrv_baseline")
+            if "sleep_score" in components:
+                pass
             if "hrv_deviation_pct" in components:
                 v = components["hrv_deviation_pct"]
                 sign = "+" if v and v > 0 else ""
-                lines.append(f"- HRV: {sign}{v}% {'✅' if v and v >= -10 else '⚠️'}")
+                if hrv_value is not None and hrv_baseline is not None:
+                    lines.append(
+                        f"- HRV: {hrv_value}ms (기준선 {hrv_baseline}ms, {sign}{v}%) {'✅' if v and v >= -10 else '⚠️'}"
+                    )
+                else:
+                    lines.append(f"- HRV: {sign}{v}% {'✅' if v and v >= -10 else '⚠️'}")
             if "body_battery" in components:
                 v = components["body_battery"]
                 lines.append(f"- Body Battery: {v} {'✅' if v and v >= 50 else '⚠️'}")
             if "rhr" in components:
                 v = components["rhr"]
-                lines.append(f"- RHR: {v}bpm {'✅' if v else ''}")
+                baseline = self._value(readiness, "rhr_baseline") or components.get("rhr_baseline")
+                if baseline is not None:
+                    lines.append(f"- RHR: {v}bpm (기준선 {baseline}) {'✅' if v else ''}")
+                else:
+                    lines.append(f"- RHR: {v}bpm {'✅' if v else ''}")
             if "tsb" in components:
                 v = components["tsb"]
                 lines.append(f"- TSB: {v} {level_emoji}")
@@ -181,8 +203,12 @@ class MorningBriefingFlow:
         # Coaching plan
         coaching_text = self._value(coaching, "text", "")
         session = self._value(coaching, "session_type", "")
+        target = self._value(coaching, "target")
         if session:
-            lines.append(f"\n🏃 오늘 계획: {session}")
+            plan = f"🏃 오늘 계획: {session}"
+            if target:
+                plan += f" {target}"
+            lines.append(f"\n{plan}")
         if coaching_text:
             lines.append(f"→ {coaching_text}")
 
@@ -201,6 +227,9 @@ class MorningBriefingFlow:
         examples = self._value(advice, "examples", [])
         if examples:
             lines.append(f"(예: {', '.join(examples[:3])})")
+        carbs = self._value(advice, "carbs")
+        if carbs:
+            lines.append(f"권장 탄수화물: {carbs}")
         return "\n".join(lines)
 
     def _to_payload(self, value: Any) -> dict[str, Any]:
