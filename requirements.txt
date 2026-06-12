@@ -1,4 +1,1 @@
-garth
-pytest
-caldav
-pyyaml
+garminconnect

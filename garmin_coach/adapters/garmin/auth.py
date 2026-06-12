@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping, Protocol, runtime_checkable
 
+from .client import TOKEN_FILE_NAME, garmin_client
 
 SENSITIVE_KEYS = {
     "password",
@@ -86,4 +87,77 @@ def authenticate_credentials(
 
 def token_paths(garth_home: str) -> list[Path]:
     root = Path(garth_home).expanduser()
-    return [root / "oauth1_token.json", root / "oauth2_token.json", root / "session.json"]
+    return [
+        root / TOKEN_FILE_NAME,
+        # Legacy garth token files, kept for cleanup of old installs.
+        root / "oauth1_token.json",
+        root / "oauth2_token.json",
+        root / "session.json",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Auth strategies
+#
+# The product roadmap swaps the unofficial SSO login for the official Garmin
+# Developer Program OAuth at the public phase. Strategies keep that swap
+# contained to this module.
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class GarminAuthStrategy(Protocol):
+    """A way of establishing a Garmin Connect session."""
+
+    name: str
+
+    def resume(self, token_dir: str) -> bool:
+        """Restore a previously saved session. Returns False if unavailable."""
+        ...
+
+    def login(
+        self,
+        credentials: Mapping[str, Any],
+        token_dir: str,
+        mfa_callback: Callable[[], str] | None = None,
+    ) -> bool:
+        """Authenticate with fresh credentials and persist tokens."""
+        ...
+
+
+class SSOPasswordAuth:
+    """Unofficial Garmin SSO login (email/password + optional MFA).
+
+    Backed by garminconnect's native auth engine; tokens persist to
+    ``token_dir`` and auto-refresh on subsequent API calls.
+    """
+
+    name = "sso_password"
+
+    def __init__(self, client=garmin_client):
+        self._client = client
+
+    def resume(self, token_dir: str) -> bool:
+        try:
+            self._client.resume(token_dir)
+            return True
+        except Exception:
+            return False
+
+    def login(
+        self,
+        credentials: Mapping[str, Any],
+        token_dir: str,
+        mfa_callback: Callable[[], str] | None = None,
+    ) -> bool:
+        email, password = validate_auth_input(credentials)
+        if not email or not password:
+            return False
+        self._client.login(email, password, prompt_mfa=mfa_callback)
+        ensure_secure_directory(os.path.expanduser(token_dir))
+        self._client.save(token_dir)
+        return True
+
+
+def default_auth_strategy() -> GarminAuthStrategy:
+    return SSOPasswordAuth()

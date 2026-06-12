@@ -794,7 +794,7 @@ class _NutritionStore:
 
 
 class _FoodPhotoAnalyzer:
-    def __init__(self, profile_service: _UserProfileService) -> None:
+    def __init__(self, profile_service: "_UserProfileService") -> None:
         self.profile_service = profile_service
 
     async def analyze(self, user_id: str, photo: bytes) -> dict[str, Any]:

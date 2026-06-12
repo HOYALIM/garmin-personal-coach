@@ -138,7 +138,7 @@ def test_more_cleanup_wave(monkeypatch, capsys, tmp_path):
     with pytest.raises(SystemExit):
         setup_wizard.run()
     out = capsys.readouterr().out
-    assert "garth not logged in yet" in out
+    assert "Garmin not logged in yet" in out
     assert "Validation warnings" in out
     assert "Aborted." in out
 

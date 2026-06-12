@@ -10,3 +10,4 @@ logs/
 snapshots/
 *.json
 .DS_Store
+.omc/

@@ -1,7 +1,7 @@
 """CLI entry point for garmin-personal-coach."""
 
-import sys
 import argparse
+import sys
 from pprint import pprint
 
 from garmin_coach._version import __version__
@@ -50,13 +50,21 @@ def _run_command(command):
         from garmin_coach.wizard import run_wizard
 
         run_wizard()
+    elif cmd == "connect-garmin":
+        from garmin_coach.wizard.garmin_login import setup_garmin_login
+
+        login_parser = argparse.ArgumentParser(prog="garmin-coach connect-garmin")
+        login_parser.add_argument("--email", default=None)
+        login_parser.add_argument("--force", action="store_true")
+        login_args = login_parser.parse_args(command[1:])
+        return 0 if setup_garmin_login(email=login_args.email, force=login_args.force) else 1
     elif cmd == "connect-strava":
         from garmin_coach.wizard.oauth import setup_strava_oauth
 
         return 0 if setup_strava_oauth() else 1
     elif cmd == "oauth-status":
-        from garmin_coach.wizard.oauth import check_oauth_status
         from garmin_coach.integrations.strava.sync import _load_state
+        from garmin_coach.wizard.oauth import check_oauth_status
 
         status = check_oauth_status()
         for provider, connected in status.items():

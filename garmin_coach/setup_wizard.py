@@ -2,24 +2,19 @@
 
 from __future__ import annotations
 
-import os
-import subprocess
 import sys
-from pathlib import Path
 
 from garmin_coach.profile_manager import (
     AICoachConfig,
     AIFlexibility,
     AIProvider,
     AITone,
-    DietaryStyle,
-    FitnessLevel,
     FitnessData,
+    FitnessLevel,
     GarminConfig,
     GarMiniAuthMethod,
-    NutritionCoachingStyle,
-    NutritionPreferences,
     NotificationMethod,
+    NutritionPreferences,
     ProfileData,
     ProfileManager,
     ScheduleConfig,
@@ -96,15 +91,12 @@ def ask_multi_choice(prompt: str, options: list[str]) -> list[str]:
 
 
 def test_garth_login(email: str) -> bool:
+    """Check for a working Garmin session (name kept for back-compat)."""
     try:
-        result = subprocess.run(
-            ["garth", "whoami"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        return result.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+        from garmin_coach.activity_fetch import resume_garth
+
+        return resume_garth()
+    except Exception:
         return False
 
 
@@ -186,13 +178,13 @@ def run() -> UserProfile:
     )
 
     print("\n─── 5. Garmin Connection ──────────────────────────────")
-    print("Run 'garth login your@email.com' in another terminal, then come back.")
+    print("Run 'garmin-coach connect-garmin' in another terminal, then come back.")
     garmin_email = ask("Garmin email (for reference)")
     garmin_connected = test_garth_login(garmin_email)
     if garmin_connected:
-        print("✓ garth login verified")
+        print("✓ Garmin login verified")
     else:
-        print("⚠ garth not logged in yet — run 'garth login email' first")
+        print("⚠ Garmin not logged in yet — run 'garmin-coach connect-garmin' first")
 
     garmin_data = GarminConfig(
         email=garmin_email or None,

@@ -146,6 +146,21 @@ def test_targeted_cleanup_branches(monkeypatch, capsys, tmp_path):
     evening.main()
     assert saved[-1][1] is True
 
+    import garmin_coach.activity_fetch as activity_fetch
+
+    monkeypatch.setattr(activity_fetch, "resume_garth", lambda: True)
+    monkeypatch.setattr(
+        activity_fetch,
+        "fetch_morning_metrics",
+        lambda target_date: {
+            "sleep_hours": 7.0,
+            "resting_hr": 50,
+            "body_battery": 70,
+            "training_readiness": 60,
+            "hrv_status": "balanced",
+            "raw": {},
+        },
+    )
     monkeypatch.setattr("sys.argv", ["final_check", "--date", "2026-03-29", "--pain"])
     assert final_check.parse_args().pain is True
     runpy.run_module("garmin_coach.final_check", run_name="__main__")
