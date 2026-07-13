@@ -5,9 +5,9 @@ from typing import Any, Optional
 
 from garmin_coach.handler.intent import Intent, detect_intent
 from garmin_coach.handler.templates import ResponseTemplate
-from garmin_coach.training_load_manager import get_training_load_manager
-from garmin_coach.rate_limit import HANDLER_LIMITER
 from garmin_coach.logging_config import log_warning
+from garmin_coach.rate_limit import HANDLER_LIMITER
+from garmin_coach.training_load_manager import get_training_load_manager
 
 
 class RateLimitError(Exception):
@@ -100,7 +100,15 @@ class MessageHandler:
                 or os.getenv("GOOGLE_API_KEY")
                 or os.getenv("GEMINI_API_KEY")
             )
-            if explicit_api_key or provider or model or env_api_key:
+            local_cli_available = False
+            if not (explicit_api_key or provider or model or env_api_key):
+                try:
+                    from garmin_coach import ai_cli
+
+                    local_cli_available = ai_cli.detect_cli() is not None
+                except Exception:
+                    local_cli_available = False
+            if explicit_api_key or provider or model or env_api_key or local_cli_available:
                 try:
                     from garmin_coach.ai_simple import AICoach
 

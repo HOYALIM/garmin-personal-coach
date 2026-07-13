@@ -97,6 +97,8 @@ def test_ai_simple_branches(monkeypatch):
 
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    # No API keys and no local AI CLI → provider none
+    monkeypatch.setattr(ai_simple.ai_cli.shutil, "which", lambda name: None)
     coach = ai_simple.AICoach()
     assert coach.provider == "none"
     assert coach.model == ""
@@ -131,9 +133,9 @@ def test_ai_simple_branches(monkeypatch):
 
 
 def test_wizard_and_adapter_branches(monkeypatch, tmp_path, capsys):
-    import garmin_coach.wizard as wizard
     import garmin_coach.adapters as adapters
     import garmin_coach.adapters.strava as strava
+    import garmin_coach.wizard as wizard
 
     inputs = iter(["x", "2"])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))

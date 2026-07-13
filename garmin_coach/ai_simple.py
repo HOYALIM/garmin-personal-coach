@@ -1,10 +1,9 @@
 import importlib
-import json
 import os
 from typing import Optional
 
+from garmin_coach import ai_cli
 from garmin_coach.logging_config import log_warning
-
 
 # Stable default models (tested and working)
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
@@ -53,6 +52,10 @@ class AICoach:
             return "openai"
         if os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"):
             return "gemini"
+        # Zero-config fallback: a locally installed, already-authenticated
+        # AI CLI (Claude Code / Gemini CLI / Codex) needs no API key at all.
+        if ai_cli.detect_cli() is not None:
+            return "cli"
         return "none"
 
     def _resolve_api_key(self, explicit_key: Optional[str]) -> Optional[str]:
@@ -88,7 +91,7 @@ class AICoach:
         return ""
 
     def generate_response(self, message: str, context: dict) -> Optional[str]:
-        if not self.api_key:
+        if not self.api_key and self.provider != "cli":
             return None
 
         system_prompt = self._build_system_prompt(context)
@@ -100,6 +103,8 @@ class AICoach:
             return self._call_anthropic(system_prompt, user_prompt)
         elif self.provider == "gemini":
             return self._call_gemini(system_prompt, user_prompt)
+        elif self.provider == "cli":
+            return self._call_cli(system_prompt, user_prompt)
 
         return None
 
@@ -174,6 +179,14 @@ Keep responses concise (2-3 sentences for quick questions, up to 1 paragraph for
         except Exception as e:
             log_warning(f"Anthropic API call failed: {e}")
             return None
+
+    def _call_cli(self, system: str, user: str) -> Optional[str]:
+        # self.model doubles as the preferred CLI name (e.g. "claude").
+        preferred = self.model if self.model in ai_cli.CLI_COMMANDS else None
+        coach = ai_cli.CLICoach(preferred)
+        if not coach.available:
+            return None
+        return coach.generate(f"{system}\n\n{user}")
 
     def _call_gemini(self, system: str, user: str) -> Optional[str]:
         try:
