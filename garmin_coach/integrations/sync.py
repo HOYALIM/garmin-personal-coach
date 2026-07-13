@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Callable
 
 from garmin_coach.adapters.garmin import GarminAdapter
+from garmin_coach.adapters.garmin.snapshot import SnapshotFetcher, SnapshotService
 from garmin_coach.engine.readiness import ReadinessCalculator
 from garmin_coach.integrations.training_load import build_training_load
 from garmin_coach.models import (
@@ -65,6 +66,9 @@ class GarminSyncService:
         self.bus = bus or SyncEventBus()
         self.readiness = ReadinessCalculator()
         self.user_id = user_id
+        self.snapshots = SnapshotService(
+            SnapshotFetcher(adapter), database, user_id=user_id
+        )
         self.last_dispatch_reports: list[EventDispatchReport] = []
 
     def sync_recent_activities(self, since: datetime | None = None) -> list[ActivitySummary]:
@@ -108,16 +112,19 @@ class GarminSyncService:
         load = build_training_load(get_training_load_manager().calculator, date_str)
         recent_activity_payloads = self.database.list_recent_activities(self.user_id, limit=7)
         recent_health_payloads = self.database.list_recent_daily_health(self.user_id, limit=7)
+        # Cache-first parallel batch (PRD v3.0 Data Plane) instead of the
+        # previous eight serial adapter calls.
+        snapshot = self.snapshots.get(target_date)
         metrics = HealthMetrics(
             metric_date=target_date,
-            sleep=self.adapter.get_sleep_data(date_str),
-            hrv=self.adapter.get_hrv_data(date_str),
-            body_battery=self.adapter.get_body_battery(date_str, date_str),
-            stress=self.adapter.get_stress_data(date_str),
-            rhr=self.adapter.get_rhr_day(date_str),
-            spo2=self.adapter.get_spo2_data(date_str),
-            body_composition=self.adapter.get_body_composition(date_str),
-            training_readiness=self.adapter.get_training_readiness(date_str),
+            sleep=snapshot.sleep,
+            hrv=snapshot.hrv,
+            body_battery=snapshot.body_battery,
+            stress=snapshot.stress,
+            rhr=snapshot.rhr,
+            spo2=snapshot.spo2,
+            body_composition=snapshot.body_composition,
+            training_readiness=snapshot.training_readiness,
             training_load=load,
             recent_activities=[
                 self._activity_from_payload(payload) for payload in recent_activity_payloads

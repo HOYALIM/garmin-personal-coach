@@ -7,7 +7,6 @@ from typing import Any
 
 from garmin_coach.adapters.garmin.auth import redact_sensitive_fields
 
-
 DEFAULT_USER_ID = "default"
 SENSITIVE_KEY_TOKENS = ("password", "token", "secret", "authorization")
 
@@ -62,6 +61,12 @@ class GarminCoachDatabase:
             [
                 "INSERT OR REPLACE INTO feedback(user_id, feedback_id, activity_date, payload) SELECT 'default', feedback_id, activity_date, payload FROM __old_feedback"
             ],
+        )
+        self._ensure_v2_table(
+            "snapshots",
+            "CREATE TABLE snapshots (user_id TEXT NOT NULL, date TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(user_id, date))",
+            ["user_id", "date", "payload"],
+            [],
         )
         self._ensure_v2_table(
             "nutrition_log",
@@ -186,6 +191,27 @@ class GarminCoachDatabase:
     def list_recent_daily_health(self, user_id: str, limit: int = 7) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             "SELECT payload FROM daily_health WHERE user_id = ? ORDER BY date DESC LIMIT ?",
+            (user_id, limit),
+        ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    def save_snapshot(self, user_id: str, metric_date: str, payload: dict[str, Any]) -> None:
+        self.conn.execute(
+            "INSERT INTO snapshots(user_id, date, payload) VALUES (?, ?, ?) ON CONFLICT(user_id, date) DO UPDATE SET payload=excluded.payload",
+            (user_id, metric_date, self._serialize_payload(payload)),
+        )
+        self.conn.commit()
+
+    def load_snapshot(self, user_id: str, metric_date: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT payload FROM snapshots WHERE user_id = ? AND date = ?",
+            (user_id, metric_date),
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def list_recent_snapshots(self, user_id: str, limit: int = 7) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT payload FROM snapshots WHERE user_id = ? ORDER BY date DESC LIMIT ?",
             (user_id, limit),
         ).fetchall()
         return [json.loads(row[0]) for row in rows]
