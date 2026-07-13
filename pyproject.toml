@@ -62,6 +62,7 @@ garmin-coach = "garmin_coach.cli:main"
 gc = "garmin_coach.cli:main"
 garmin-coach-telegram = "garmin_coach.telegram_bot:main"
 garmin-coach-mcp = "mcp_server.entrypoint:main"
+garmin-coach-imessage = "garmin_coach.interfaces.imessage.poller:main"
 
 [project.urls]
 Homepage = "https://github.com/HOYALIM/garmin-personal-coach"
