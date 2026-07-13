@@ -7,16 +7,20 @@ import requests
 
 from garmin_coach.adapters import (
     Activity,
-    DataSource,
     DailySummary,
+    DataSource,
     UserProfile,
 )
-from garmin_coach.logging_config import log_error
-
+from garmin_coach.logging_config import log_error, log_warning
 
 STRAVA_CONFIG_DIR = os.path.expanduser("~/.config/garmin_coach")
 STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
 TOKEN_REFRESH_WINDOW_SECONDS = 300
+# Strava's 2026 tightened limits: 200/15min, 2000/day. A full-history backfill
+# can burn through the 15-minute window; back off on 429 instead of silently
+# truncating the activity list mid-backfill.
+RATE_LIMIT_MAX_RETRIES = 3
+RATE_LIMIT_DEFAULT_WAIT_SECONDS = 60
 
 
 def get_strava_token() -> Optional[dict]:
@@ -194,6 +198,16 @@ class StravaAdapter(DataSource):
             log_error(f"Strava API request failed for {path}", exc=e)
             return None
 
+    @staticmethod
+    def _retry_after_seconds(resp: "requests.Response") -> int:
+        header = resp.headers.get("Retry-After")
+        if header:
+            try:
+                return max(1, int(float(header)))
+            except ValueError:
+                pass
+        return RATE_LIMIT_DEFAULT_WAIT_SECONDS
+
     def get_profile(self) -> Optional[UserProfile]:
         if self._profile_cache:
             return self._profile_cache
@@ -240,6 +254,7 @@ class StravaAdapter(DataSource):
         activities = []
         page = 1
         per_page = 100
+        retries_this_page = 0
 
         while True:
             try:
@@ -251,7 +266,27 @@ class StravaAdapter(DataSource):
                 resp = self._request("/activities", params=params)
                 if not resp:
                     break
+                if resp.status_code == 429:
+                    if retries_this_page >= RATE_LIMIT_MAX_RETRIES:
+                        log_warning(
+                            f"Strava rate limit persisted after {retries_this_page} retries; "
+                            f"backfill truncated at page {page} ({len(activities)} activities so far)."
+                        )
+                        break
+                    wait_seconds = self._retry_after_seconds(resp)
+                    log_warning(
+                        f"Strava rate limited (429) on page {page}; "
+                        f"waiting {wait_seconds}s before retry."
+                    )
+                    time.sleep(wait_seconds)
+                    retries_this_page += 1
+                    continue
+                retries_this_page = 0
                 if resp.status_code != 200:
+                    log_warning(
+                        f"Strava API returned {resp.status_code} on page {page}; "
+                        f"backfill truncated at {len(activities)} activities."
+                    )
                     break
                 data = resp.json()
                 if not data:
