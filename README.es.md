@@ -24,7 +24,7 @@ No incluye todavía dashboard web, app móvil ni análisis de calorías por foto
 
 ```bash
 pip install garmin-personal-coach[all]
-garth login your@email.com
+garmin-coach connect-garmin --email your@email.com
 garmin-coach setup
 ```
 

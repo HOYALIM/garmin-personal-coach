@@ -24,7 +24,7 @@ Garmin Personal Coach は Garmin-first の AI コーチングエンジンです�
 
 ```bash
 pip install garmin-personal-coach[all]
-garth login your@email.com
+garmin-coach connect-garmin --email your@email.com
 garmin-coach setup
 ```
 
