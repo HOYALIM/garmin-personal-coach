@@ -205,3 +205,126 @@ def test_pending_flow_input_bypasses_message_handler(db_path):
     result = asyncio.run(scenario())
     assert result == "rest"
     assert handler.calls == []  # never touched the free-text coaching path
+
+
+# -- conversational onboarding (async runtime) --------------------------------
+
+
+class FakeOnboarding:
+    """Asks one question through the adapter, like the real OnboardingFlow."""
+
+    def __init__(self, adapter):
+        self.adapter = adapter
+        self.calls = 0
+        self.answers: list[str] = []
+
+    async def execute(self, user_id):
+        self.calls += 1
+        answer = await self.adapter.request_text(user_id, "👋 이름을 알려주세요.")
+        self.answers.append(answer)
+
+
+class BoomOnboarding:
+    def __init__(self):
+        self.calls = 0
+
+    async def execute(self, user_id):
+        self.calls += 1
+        raise RuntimeError("onboarding exploded")
+
+
+def _make_onboarding_poller(db_path, onboarding_factory=None):
+    sender = RecordingSender()
+    handler = FakeMessageHandler()
+    adapter = IMessageAdapter(sender=sender)
+    onboarding = onboarding_factory(adapter) if onboarding_factory else FakeOnboarding(adapter)
+    poller = IMessagePoller(
+        reader=ChatDBReader(str(db_path)),
+        adapter=adapter,
+        message_handler=handler,
+        onboarding=onboarding,
+    )
+    poller.bootstrap_if_first_run()
+    return poller, adapter, sender, handler, onboarding
+
+
+async def _wait_for_pending(adapter, handle, timeout=2.0):
+    import asyncio
+
+    async def wait():
+        while handle not in adapter._pending:
+            await asyncio.sleep(0.001)
+
+    await asyncio.wait_for(wait(), timeout=timeout)
+
+
+def test_first_contact_in_async_runtime_starts_onboarding(db_path):
+    import asyncio
+
+    poller, adapter, sender, handler, onboarding = _make_onboarding_poller(db_path)
+
+    async def scenario():
+        _insert(db_path, 1, "안녕하세요")
+        poller.poll_once()  # spawns the onboarding task
+        await _wait_for_pending(adapter, "+15551234567")
+        _insert(db_path, 2, "Ho")
+        poller.poll_once()  # routed into the awaiting flow, not MessageHandler
+        await poller._onboarding_tasks["+15551234567"]
+
+    asyncio.run(scenario())
+
+    assert onboarding.calls == 1
+    assert onboarding.answers == ["Ho"]
+    assert handler.calls == []  # nothing leaked to free-text coaching
+    assert any("이름" in text for _, text in sender.sent)
+    assert all(text != FIRST_CONTACT_NUDGE for _, text in sender.sent)
+
+
+def test_restart_keyword_respawns_onboarding_for_known_handle(db_path):
+    import asyncio
+
+    poller, adapter, sender, handler, onboarding = _make_onboarding_poller(db_path)
+    poller.state["known_handles"] = ["+15551234567"]  # e.g. process restarted mid-onboarding
+
+    async def scenario():
+        _insert(db_path, 1, "시작")
+        poller.poll_once()
+        await _wait_for_pending(adapter, "+15551234567")
+        _insert(db_path, 2, "Ho")
+        poller.poll_once()
+        await poller._onboarding_tasks["+15551234567"]
+
+    asyncio.run(scenario())
+
+    assert onboarding.calls == 1
+    assert handler.calls == []
+
+
+def test_onboarding_crash_sends_recovery_hint(db_path):
+    import asyncio
+
+    from garmin_coach.interfaces.imessage.poller import ONBOARDING_FAILED_MESSAGE
+
+    poller, adapter, sender, handler, onboarding = _make_onboarding_poller(
+        db_path, onboarding_factory=lambda adapter: BoomOnboarding()
+    )
+
+    async def scenario():
+        _insert(db_path, 1, "hi")
+        poller.poll_once()
+        await poller._onboarding_tasks["+15551234567"]
+
+    asyncio.run(scenario())
+
+    assert onboarding.calls == 1
+    assert sender.sent == [("+15551234567", ONBOARDING_FAILED_MESSAGE)]
+
+
+def test_sync_poll_without_loop_still_falls_back_to_nudge(db_path):
+    poller, adapter, sender, handler, onboarding = _make_onboarding_poller(db_path)
+
+    _insert(db_path, 1, "hi")
+    poller.poll_once()  # no running event loop here
+
+    assert onboarding.calls == 0
+    assert sender.sent == [("+15551234567", FIRST_CONTACT_NUDGE)]

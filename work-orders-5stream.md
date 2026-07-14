@@ -120,20 +120,28 @@ Apple Messages for Business/MSP 파트너십을 썼을 가능성이 높고, 1인
 정의 시점에 고정되어 이후 몽키패치가 안 먹힘 — 함수 본문에서 `runner or subprocess.run`으로
 지연 조회해야 테스트로 가로챌 수 있음.
 
+### 추가 구현 완료 (2026-07-13, 2차)
+
+- ✅ **서비스 추출**: `_UserProfileService` + `_scoped_garth_home`를 `garmin_coach/services/user_profile.py`로
+  기계적 추출(verbatim 이동, 스크립트로 경계 검증). telegram_bot.py는
+  `UserProfileService as _UserProfileService` 별칭으로 re-import — 기존 테스트의 서브클래싱/몽키패치
+  전부 무수정 호환. 상태 루트는 `telegram_states/` 경로 그대로 유지(이름은 역사적 유물이지만
+  기존 사용자 프로필이 이미 거기 있어서 이관 이득 없음 — services 모듈 docstring에 기록).
+- ✅ **대화형 온보딩 배선**: 폴러를 async 루프(`run_async`)로 전환. 신규 연락처 첫 문자 →
+  `OnboardingFlow`(Telegram과 동일 플로우, CoachingPort 경유)가 백그라운드 태스크로 시작,
+  이후 답장은 pending-input 경로로 플로우에 전달. 온보딩 크래시/프로세스 재시작 후에는
+  "시작"/"/start"/"온보딩" 키워드로 저장된 진행상황에서 재개(프로필 존재 검사 대신 명시적
+  키워드를 택함 — 러닝 루프 안에서 sync 프로필 검사가 불가능하고, 예측 가능성도 더 좋음).
+  이벤트 루프 없는 sync 호출(테스트/원샷 스크립트)에서는 기존 nudge 폴백 유지. 테스트 12종.
+
 ### 미완료 (다음 착수 항목)
 
-- 🔲 **대화형 온보딩 연결**: 지금은 신규 연락처에게 "터미널에서 setup 실행하세요" 안내만 함.
-  실제 채팅으로 "가민 연결할래? 스트라바도?" 온보딩을 하려면 `flows/onboarding.py`의
-  `OnboardingService`를 iMessage 어댑터에 연결해야 하는데, 현재 그 구현체(`_UserProfileService`)가
-  레거시 `telegram_bot.py` 안에 private으로 박혀 있어(S-C 레거시 상환 대상) 그대로 import하면
-  "flows/는 특정 interface에 의존 금지" 규칙을 새 채널 만들자마자 어기게 됨. 올바른 다음 단계는
-  `_UserProfileService`를 `garmin_coach/services/`류의 공유 위치로 추출하는 것 — 검증 안 된 채로
-  급하게 끌어다 쓰는 대신 이 작업을 먼저 하는 게 맞음
 - 🔲 이미지 전송: AppleScript는 파일 경로만 첨부 가능(원시 bytes 불가) — 임시로 텍스트 안내로 대체 중
 - 🔲 사진 수신(`request_photo`): 항상 스킵 처리 중. `attachment` 테이블 연동은 로드맵
-- 🔲 스케줄 브리핑 push 경로를 Telegram scheduler와 공유하도록 연결
+- 🔲 스케줄 브리핑 push 경로를 Telegram scheduler와 공유하도록 연결 (→ S-B에서 진행)
 - 🔲 **실사용 검증**: Full Disk Access 승인 후 사용자 본인 Mac에서 실제 문자로 왕복 테스트 필요 —
-  synthetic 테스트로는 검증 못 하는 부분(실제 Messages.app 동작, 실제 chat.db 스키마 버전 차이 등)
+  synthetic 테스트로는 검증 못 하는 부분(실제 Messages.app 동작, 실제 chat.db 스키마 버전 차이,
+  실제 Garmin 로그인이 온보딩 중 이뤄지는 경로 등)
 
 ## S-D. 리포트 & 트렌드
 

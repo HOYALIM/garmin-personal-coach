@@ -1,30 +1,32 @@
-"""iMessage polling loop: chat.db → coaching reply → AppleScript send.
+"""iMessage polling loop: chat.db → onboarding/coaching → AppleScript send.
 
 Wires the channel-agnostic pieces together:
 - chat_db.ChatDBReader for inbound messages (per §chat_db.py docstring, needs
   Full Disk Access)
 - IMessageAdapter for any flow currently awaiting this handle's input
+- flows.onboarding.OnboardingFlow + services.user_profile.UserProfileService
+  for first-contact conversational onboarding ("text this number, answer a
+  few questions, Garmin connected") — the same flow Telegram runs, reused
+  through CoachingPort with zero flow-layer changes
 - garmin_coach.handler.MessageHandler (same free-text engine CLI/Telegram/MCP
   already use) for everything else, so "text anything, get coached" works
-  immediately without a bespoke NL layer per channel
+  without a bespoke NL layer per channel
 
-NOT wired yet: the full conversational onboarding flow (OnboardingFlow +
-"connect your Garmin/Strava" Q&A). That flow's `onboarding_service` today
-lives as `_UserProfileService`, a private class inside the legacy
-`telegram_bot.py` — reusing it here as-is would import across a channel
-boundary the project's own architecture rule forbids (flows/ must not
-depend on any one interface's internals). Extracting it into a shared
-`garmin_coach/services/` module is the correct next step (tracked in
-work-orders-5stream.md §S-F) rather than a quick coupling-violating import.
-Until then, a brand-new contact gets a one-time "run `garmin-coach setup`
-first" nudge instead of an in-chat onboarding flow.
+Message routing order per inbound text:
+1. an in-flight flow awaiting this handle's reply (adapter.deliver_input)
+2. first contact ever → spawn OnboardingFlow as a background asyncio task
+3. otherwise → MessageHandler free-text coaching
+
+Onboarding requires the async runtime (`run_forever`); if poll_once is
+driven synchronously with no event loop (tests, one-shot scripts), first
+contact falls back to a "run garmin-coach setup" nudge instead.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
-import time
 from typing import Any
 
 from garmin_coach.interfaces.imessage.adapter import IMessageAdapter
@@ -37,9 +39,12 @@ STATE_FILE = os.path.join(STATE_DIR, "imessage_state.json")
 DEFAULT_POLL_INTERVAL_SECONDS = 5
 FIRST_CONTACT_NUDGE = (
     "안녕하세요! 아직 이 번호로 온보딩된 프로필이 없어요.\n"
-    "터미널에서 `garmin-coach setup`을 먼저 실행해 Garmin 계정을 연결해주세요.\n"
-    "(대화형 온보딩은 곧 지원 예정입니다.)"
+    "터미널에서 `garmin-coach setup`을 먼저 실행해 Garmin 계정을 연결해주세요."
 )
+ONBOARDING_FAILED_MESSAGE = (
+    "온보딩 중 문제가 생겼어요. '시작'이라고 보내시면 이어서 다시 진행할게요."
+)
+RESTART_KEYWORDS = {"/start", "start", "시작", "온보딩", "다시"}
 
 
 def _load_state() -> dict[str, Any]:
@@ -65,6 +70,17 @@ def _save_state(state: dict[str, Any]) -> None:
     os.chmod(STATE_FILE, 0o600)
 
 
+def _build_default_onboarding(adapter: IMessageAdapter) -> Any:
+    try:
+        from garmin_coach.flows.onboarding import OnboardingFlow
+        from garmin_coach.services.user_profile import UserProfileService
+
+        return OnboardingFlow(adapter, onboarding_service=UserProfileService())
+    except Exception as exc:
+        log_warning(f"iMessage onboarding flow unavailable: {exc}")
+        return None
+
+
 class IMessagePoller:
     def __init__(
         self,
@@ -73,6 +89,7 @@ class IMessagePoller:
         message_handler: Any = None,
         poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
         sender: Any = None,
+        onboarding: Any = None,
     ):
         self.reader = reader or ChatDBReader()
         # A single sender shared with the adapter — every outbound path
@@ -93,8 +110,12 @@ class IMessagePoller:
 
             message_handler = MessageHandler()
         self.message_handler = message_handler
+        self.onboarding = (
+            onboarding if onboarding is not None else _build_default_onboarding(self.adapter)
+        )
         self.poll_interval_seconds = poll_interval_seconds
         self.state = _load_state()
+        self._onboarding_tasks: dict[str, asyncio.Task] = {}
 
     def bootstrap_if_first_run(self) -> None:
         """On a brand-new state file, start from the current high-water mark
@@ -121,7 +142,15 @@ class IMessagePoller:
         if handle not in known:
             known.add(handle)
             self.state["known_handles"] = sorted(known)
-            self.sender(handle, FIRST_CONTACT_NUDGE)
+            if not self._spawn_onboarding(handle):
+                self.sender(handle, FIRST_CONTACT_NUDGE)
+            return
+
+        # Explicit restart: covers a crashed/timed-out onboarding AND a
+        # process restart mid-onboarding (known_handles persists, so the
+        # first-contact branch won't fire again). OnboardingFlow resumes
+        # from its own saved progress, so no answers are lost.
+        if text.strip().lower() in RESTART_KEYWORDS and self._spawn_onboarding(handle):
             return
 
         try:
@@ -131,12 +160,29 @@ class IMessagePoller:
             reply = "죄송해요, 잠시 문제가 생겼어요. 다시 시도해주세요."
         self.sender(handle, reply)
 
-    def run_forever(self) -> None:
+    def _spawn_onboarding(self, handle: str) -> bool:
+        """Start OnboardingFlow as a background task. Returns False when there
+        is no flow or no running event loop (sync poll_once callers)."""
+        if self.onboarding is None:
+            return False
         try:
-            self.reader.max_rowid()
-        except ChatDBPermissionError as exc:
-            log_error(str(exc))
-            raise
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+
+        async def run() -> None:
+            async with self.adapter.get_user_lock(handle):
+                try:
+                    await self.onboarding.execute(handle)
+                except Exception as exc:
+                    log_error(f"iMessage onboarding failed for {handle}", exc=exc)
+                    await asyncio.to_thread(self.sender, handle, ONBOARDING_FAILED_MESSAGE)
+
+        self._onboarding_tasks[handle] = loop.create_task(run())
+        return True
+
+    async def run_async(self) -> None:
+        self.reader.max_rowid()  # fail fast on missing Full Disk Access
         self.bootstrap_if_first_run()
         log_info(f"iMessage poller started (interval={self.poll_interval_seconds}s)")
         while True:
@@ -146,7 +192,14 @@ class IMessagePoller:
                 raise
             except Exception as exc:
                 log_error("iMessage poll iteration failed", exc=exc)
-            time.sleep(self.poll_interval_seconds)
+            await asyncio.sleep(self.poll_interval_seconds)
+
+    def run_forever(self) -> None:
+        try:
+            asyncio.run(self.run_async())
+        except ChatDBPermissionError as exc:
+            log_error(str(exc))
+            raise
 
 
 def main() -> int:
