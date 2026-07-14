@@ -115,6 +115,11 @@ def _run_command(command):
 
         result = process_message("운동 끝")
         print(result)
+    elif cmd == "chat":
+        from garmin_coach.handler import process_message
+
+        message = " ".join(command[1:]).strip() or "오늘 어떻게 훈련할까?"
+        print(process_message(message))
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)
         return 1

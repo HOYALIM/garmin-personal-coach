@@ -83,6 +83,14 @@ def test_dispatch_and_cli_branches(monkeypatch, capsys):
     )
     assert cli.main() == 0
     assert "logged" in capsys.readouterr().out
+    monkeypatch.setattr("sys.argv", ["garmin-coach", "chat", "오늘", "훈련", "뭐하지"])
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "garmin_coach.handler",
+        SimpleNamespace(process_message=lambda m: f"echo:{m}"),
+    )
+    assert cli.main() == 0
+    assert "echo:오늘 훈련 뭐하지" in capsys.readouterr().out
     monkeypatch.setattr("sys.argv", ["garmin-coach", "unknown"])
     assert cli.main() == 1
     assert "Unknown command" in capsys.readouterr().err
