@@ -117,15 +117,33 @@ class AICoach:
         tsb = context.get("tsb", 0)
         activities = context.get("activities_today", 0)
 
+        # PRD v3.0 Trust axis: never let the model call stale numbers "current".
+        age_days = context.get("load_age_days")
+        # Prefer the last real data date; snapshot "date" is just the day the
+        # decay was evaluated for and is always ~today.
+        load_date = context.get("last_data_date") or context.get("date")
+        as_of = f" (as of {load_date})" if load_date else ""
+        if isinstance(age_days, int) and age_days > 1:
+            heading = f"Training metrics{as_of} — {age_days} DAYS OLD"
+            staleness_rule = (
+                f"\nIMPORTANT: these metrics are {age_days} days old. Tell the user the data "
+                "is stale and must be refreshed; never present it as today's condition. "
+                "If the user states different current numbers, trust the user over this data.\n"
+            )
+        else:
+            heading = f"Current training metrics{as_of}"
+            staleness_rule = ""
+
         return f"""You are a knowledgeable, supportive endurance sports coach.
 
 {name_str}
-Current training metrics:
+{heading}:
 - CTL (42-day fitness): {ctl:.1f}
 - ATL (7-day fatigue): {atl:.1f}
 - TSB (form): {tsb:.1f}
 - Activities today: {activities}
-
+{staleness_rule}
+Always reply in the same language the user writes in.
 Coach the user in a warm, encouraging tone. Be specific with numbers and recommendations.
 Keep responses concise (2-3 sentences for quick questions, up to 1 paragraph for detailed advice."""
 
@@ -133,6 +151,12 @@ Keep responses concise (2-3 sentences for quick questions, up to 1 paragraph for
         tsb = context.get("tsb", 0)
 
         prompt = f"User said: {message}\n\n"
+
+        # A TSB from weeks ago says nothing about today's fatigue; asserting
+        # it here would contradict the staleness warning in the system prompt.
+        age_days = context.get("load_age_days")
+        if isinstance(age_days, int) and age_days > 7:
+            return prompt
 
         if tsb < -25:
             prompt += (

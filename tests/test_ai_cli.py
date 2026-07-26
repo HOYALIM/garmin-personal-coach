@@ -107,3 +107,79 @@ def test_aicoach_api_key_still_wins_over_cli(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
     monkeypatch.setattr(ai_cli.shutil, "which", _which_factory({"claude": "/bin/claude"}))
     assert AICoach().provider == "anthropic"
+
+
+# -- trust: staleness disclosure + language pinning ---------------------------
+
+
+def test_stale_load_is_labelled_and_flagged_to_the_model():
+    """Live bug: the coach cited April data as "my current data" in July."""
+    coach = AICoach(api_key="x", provider="anthropic")
+    prompt = coach._build_system_prompt(
+        {"ctl": 50, "atl": 40, "tsb": 2.4, "date": "2026-04-09", "load_age_days": 107}
+    )
+    assert "107 DAYS OLD" in prompt
+    assert "2026-04-09" in prompt
+    assert "never present it as today's condition" in prompt
+    assert "Current training metrics" not in prompt
+
+
+def test_fresh_load_has_no_staleness_warning():
+    coach = AICoach(api_key="x", provider="anthropic")
+    prompt = coach._build_system_prompt(
+        {"ctl": 50, "atl": 40, "tsb": 2.4, "date": "2026-07-26", "load_age_days": 0}
+    )
+    assert "Current training metrics (as of 2026-07-26)" in prompt
+    assert "DAYS OLD" not in prompt
+
+
+def test_language_rule_is_always_present():
+    """User asked in Korean and got English back; nothing pinned the language."""
+    coach = AICoach(api_key="x", provider="anthropic")
+    for ctx in ({}, {"load_age_days": 107, "date": "2026-04-09"}):
+        assert "same language the user writes in" in coach._build_system_prompt(ctx)
+
+
+def test_stale_load_suppresses_canned_tsb_hint():
+    coach = AICoach(api_key="x", provider="anthropic")
+    stale = coach._build_user_prompt("how do I feel?", {"tsb": -30, "load_age_days": 107})
+    assert "very fatigued" not in stale
+    fresh = coach._build_user_prompt("how do I feel?", {"tsb": -30, "load_age_days": 0})
+    assert "very fatigued" in fresh
+
+
+def test_handler_context_carries_load_age(monkeypatch):
+    from datetime import date, timedelta
+
+    import garmin_coach.handler as handler
+
+    six_days_ago = (date.today() - timedelta(days=6)).isoformat()
+    monkeypatch.setattr(
+        handler,
+        "get_training_load_manager",
+        lambda: SimpleNamespace(
+            get_context=lambda: {
+                "ctl": 1,
+                "atl": 2,
+                "tsb": 3,
+                # snapshot date is always ~today; only last_data_date shows age
+                "date": date.today().isoformat(),
+                "last_data_date": six_days_ago,
+            }
+        ),
+    )
+    assert handler._get_real_context()["load_age_days"] == 6
+
+
+def test_handler_context_tolerates_missing_or_bad_date(monkeypatch):
+    import garmin_coach.handler as handler
+
+    for bad in (None, "not-a-date"):
+        monkeypatch.setattr(
+            handler,
+            "get_training_load_manager",
+            lambda bad=bad: SimpleNamespace(
+                get_context=lambda: {"ctl": 1, "atl": 2, "tsb": 3, "last_data_date": bad}
+            ),
+        )
+        assert handler._get_real_context()["load_age_days"] is None

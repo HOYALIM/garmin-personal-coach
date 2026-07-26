@@ -1,6 +1,7 @@
 """Natural language message handler with real data and AI."""
 
 import os
+from datetime import date
 from typing import Any, Optional
 
 from garmin_coach.handler.intent import Intent, detect_intent
@@ -50,6 +51,16 @@ def _normalize_config(config: dict) -> dict:
     return config
 
 
+def _days_since(date_str: Any) -> int | None:
+    """Age in days of an ISO date string, or None if unusable."""
+    if not isinstance(date_str, str):
+        return None
+    try:
+        return (date.today() - date.fromisoformat(date_str)).days
+    except ValueError:
+        return None
+
+
 def _get_real_context() -> dict:
     context = {}
 
@@ -63,6 +74,12 @@ def _get_real_context() -> dict:
         manager = get_training_load_manager()
         load_context = manager.get_context()
         context.update(load_context)
+        # How old this training load actually is. Without it the coach
+        # presented months-old numbers as "current data" (observed live:
+        # April data cited on 25 July).
+        # Age of the newest REAL data point, not of the computed snapshot —
+        # see TrainingLoadManager.last_data_date for why those differ.
+        context["load_age_days"] = _days_since(load_context.get("last_data_date"))
 
         if context.get("ctl", 0) == 0 and context.get("atl", 0) == 0:
             context["has_data"] = False

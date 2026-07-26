@@ -1,20 +1,16 @@
 """Training load manager with persistence."""
 
 import os
-import json
-from datetime import datetime, date
+from datetime import date
 from pathlib import Path
 from typing import Optional
 
-from garmin_coach.training_load import (
-    TrainingLoadCalculator,
-    LoadSnapshot,
-    DailyLoad,
-    Sport,
-    FormCategory,
-)
 from garmin_coach.logging_config import log_warning
-
+from garmin_coach.training_load import (
+    LoadSnapshot,
+    Sport,
+    TrainingLoadCalculator,
+)
 
 DATA_DIR = os.path.expanduser("~/.config/garmin_coach")
 LOAD_FILE = os.path.join(DATA_DIR, "training_load.json")
@@ -96,7 +92,22 @@ class TrainingLoadManager:
             "tsb": snapshot.tsb,
             "form": snapshot.form.value,
             "date": snapshot.date.isoformat(),
+            "last_data_date": self.last_data_date(),
         }
+
+    def last_data_date(self) -> Optional[str]:
+        """ISO date of the most recent day that actually has load data.
+
+        NOT the same as snapshot.date: CTL/ATL are exponential decays, so the
+        calculator will happily produce a number dated today from inputs that
+        stopped months ago. Freshness must be judged on the last real input —
+        judging it on snapshot.date reported "0 days old" for data whose last
+        activity was 108 days earlier.
+        """
+        loads = getattr(self._calc, "_loads", None)
+        if not loads:
+            return None
+        return max(loads.keys())
 
     def save(self):
         try:
