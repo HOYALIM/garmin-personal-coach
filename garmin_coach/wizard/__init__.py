@@ -99,11 +99,10 @@ def prompt_optional(prompt_text: str, default: Optional[str] = None) -> Optional
 
 def _check_garmin_connection() -> bool:
     try:
-        import garth
+        from garmin_coach.adapters.garmin.client import default_token_dir, garmin_client
 
-        GARTH_HOME = os.getenv("GARTH_HOME", "~/.garth")
-        garth.resume(os.path.expanduser(GARTH_HOME))
-        garth.connectapi("/userprofile-service/socialProfile")
+        garmin_client.resume(default_token_dir())
+        garmin_client.connectapi("/userprofile-service/socialProfile")
         return True
     except Exception as e:
         log_warning(f"Garmin connection check failed: {e}")
@@ -245,7 +244,7 @@ def run_wizard():
     if garmin_connected:
         print("✅ Garmin account connected!")
     else:
-        print("⚠️  Garmin not connected. Run 'garth login your@email.com' after setup.")
+        print("⚠️  Garmin not connected. Run 'garmin-coach connect-garmin' after setup.")
 
     print("\n--- Schedule ---")
     morning_time = input("Morning check-in time (HH:MM) [default: 06:00]: ").strip() or "06:00"
@@ -367,7 +366,7 @@ def run_wizard():
     print(f"Config saved to: {CONFIG_FILE}")
     print("\nNext steps:")
     if not garmin_connected:
-        print("  1. Run 'garth login your@email.com' to connect Garmin")
+        print("  1. Run 'garmin-coach connect-garmin' to connect Garmin")
     print("  2. Run 'garmin-coach status' to check your training status")
     print("  3. (Optional) Run 'garmin-coach-telegram' for mobile notifications")
     print()

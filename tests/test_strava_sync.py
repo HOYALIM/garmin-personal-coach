@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 
@@ -234,7 +234,10 @@ def test_sync_strava_training_load_removes_stale_previous_day(monkeypatch, tmp_p
     monkeypatch.setattr(sync, "INTEGRATIONS_DIR", str(tmp_path))
     state_file = tmp_path / "strava_sync_state.json"
     monkeypatch.setattr(sync, "STRAVA_SYNC_STATE_FILE", str(state_file))
-    state_file.write_text(json.dumps({"days": {"2026-03-29": {"fingerprint": "old"}}}))
+    # Dates must stay inside the sync window, so compute them relative to now.
+    stale_day = (datetime.now() - timedelta(days=3)).date().isoformat()
+    current_day = (datetime.now() - timedelta(days=2)).date().isoformat()
+    state_file.write_text(json.dumps({"days": {stale_day: {"fingerprint": "old"}}}))
 
     removed = []
     saved = []
@@ -244,7 +247,7 @@ def test_sync_strava_training_load_removes_stale_previous_day(monkeypatch, tmp_p
             self.session_calculator = SimpleNamespace(calculate_trimp=lambda **kwargs: 20.0)
 
         def get_session(self, d):
-            if d.isoformat() == "2026-03-29":
+            if d.isoformat() == stale_day:
                 return SimpleNamespace(description="[strava-sync] old batch")
             return None
 
@@ -273,20 +276,20 @@ def test_sync_strava_training_load_removes_stale_previous_day(monkeypatch, tmp_p
                 SimpleNamespace(
                     activity_id="shifted",
                     sport_type="Run",
-                    start_time=datetime(2026, 3, 29, 23, 30, tzinfo=timezone.utc),
+                    start_time=datetime.fromisoformat(f"{current_day}T08:30:00+00:00"),
                     duration_seconds=1800,
                     distance_meters=5000,
                     calories=300,
                     heart_rate_avg=150,
-                    raw_data={"activity": {"start_date_local": "2026-03-30T08:30:00"}},
+                    raw_data={"activity": {"start_date_local": f"{current_day}T08:30:00"}},
                 )
             ]
 
     monkeypatch.setattr(sync, "StravaAdapter", FakeAdapter)
     result = sync.sync_strava_training_load(days=7, dry_run=False)
     assert result["removed"] == 1
-    assert removed == ["2026-03-29"]
-    assert saved == ["2026-03-30"]
+    assert removed == [stale_day]
+    assert saved == [current_day]
 
 
 def test_sync_strava_training_load_keeps_old_days_outside_window(monkeypatch, tmp_path):
@@ -434,8 +437,10 @@ def test_stale_removal_not_existing_clears_state(monkeypatch, tmp_path):
     monkeypatch.setattr(sync, "INTEGRATIONS_DIR", str(tmp_path))
     state_file = tmp_path / "strava_sync_state.json"
     monkeypatch.setattr(sync, "STRAVA_SYNC_STATE_FILE", str(state_file))
+    # Stale day must be inside the sync window, so compute it relative to now.
+    stale_day = (datetime.now() - timedelta(days=3)).date().isoformat()
     state_file.write_text(json.dumps({
-        "days": {"2026-03-29": {"fingerprint": "old", "external_ids": ["a1"]}}
+        "days": {stale_day: {"fingerprint": "old", "external_ids": ["a1"]}}
     }))
 
     class FakeManager:
@@ -459,12 +464,12 @@ def test_stale_removal_not_existing_clears_state(monkeypatch, tmp_path):
             return True
 
         def get_activities(self, *a, **kw):
-            # Return activity on a different day so 2026-03-29 is stale
+            # Return activity on a different day so the stale day stays stale
             return [
                 SimpleNamespace(
                     activity_id="b1",
                     sport_type="Run",
-                    start_time=datetime(2026, 3, 30, 7, 0, tzinfo=timezone.utc),
+                    start_time=datetime.now(timezone.utc) - timedelta(days=2),
                     duration_seconds=1800,
                     distance_meters=5000,
                     calories=300,
@@ -480,4 +485,4 @@ def test_stale_removal_not_existing_clears_state(monkeypatch, tmp_path):
     assert result["removed"] == 0
     # State entry cleared
     saved = json.loads(state_file.read_text())
-    assert "2026-03-29" not in saved["days"]
+    assert stale_day not in saved["days"]

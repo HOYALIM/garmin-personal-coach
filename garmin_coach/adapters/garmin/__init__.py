@@ -4,7 +4,6 @@ import os
 from datetime import datetime, timedelta
 from typing import Any, List, Optional
 
-import garth
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from garmin_coach.adapters import Activity, DailySummary, DataSource, UserProfile
@@ -23,6 +22,7 @@ from garmin_coach.models import (
 
 from .activity import enrich_activity_summary
 from .auth import authenticate_credentials, ensure_secure_directory, validate_token_store
+from .client import garmin_client
 from .health import (
     parse_body_battery,
     parse_body_composition,
@@ -34,7 +34,13 @@ from .health import (
     parse_training_readiness,
 )
 
-GARTH_HOME = os.path.expanduser(os.getenv("GARTH_HOME", "~/.garth"))
+# garth-compatible facade: existing call sites and test monkeypatches keep
+# working against the module attribute named "garth".
+garth = garmin_client
+
+GARTH_HOME = os.path.expanduser(
+    os.getenv("GARMINTOKENS") or os.getenv("GARTH_HOME") or "~/.garminconnect"
+)
 
 
 def _connectapi_first_success(paths: list[str]) -> Any:
@@ -171,68 +177,66 @@ class GarminAdapter(DataSource):
             return []
         if end_date is None:
             end_date = datetime.now()
+        try:
+            raw_activities = garth.get_activities_by_date(
+                start_date.strftime("%Y-%m-%d"),
+                end_date.strftime("%Y-%m-%d"),
+                sport_type,
+            )
+        except Exception as e:
+            log_error("Garmin API error fetching activities", exc=e)
+            return []
         activities = []
-        current_date = start_date
-        while current_date <= end_date:
-            try:
-                daily = garth.DailySummary.get(current_date.strftime("%Y-%m-%d"))
-                daily_entries = daily if isinstance(daily, list) else []
-                for act in daily_entries:
-                    act_sport = (
-                        getattr(act.activity_type, "type_key", None)
-                        if hasattr(act, "activity_type")
-                        else None
-                    )
-                    if sport_type and act_sport != sport_type:
-                        continue
-                    start_time = getattr(act, "start_time_local", None)
-                    if start_time and not isinstance(start_time, datetime):
-                        try:
-                            start_time = datetime.fromisoformat(str(start_time))
-                        except Exception:
-                            continue
-                    distance = getattr(act, "distance", None)
-                    duration = getattr(act, "duration", 0)
-                    avg_speed = getattr(act, "average_speed", 0)
-                    activities.append(
-                        Activity(
-                            activity_id=str(getattr(act, "activity_id", "")),
-                            name=getattr(act, "activity_name", "Unknown"),
-                            sport_type=act_sport or "unknown",
-                            start_time=start_time or current_date,
-                            duration_seconds=int(duration) if duration else 0,
-                            distance_meters=distance,
-                            calories=getattr(act, "calories", None),
-                            heart_rate_avg=getattr(act, "average_heart_rate", None),
-                            heart_rate_max=getattr(act, "max_heart_rate", None),
-                            power_avg=getattr(act, "average_power", None),
-                            pace_sec_per_km=mps_to_pace_sec_per_km(avg_speed)
-                            if avg_speed
-                            else None,
-                            elevation_gain=getattr(act, "elevation_gain", None),
-                            raw_data={"garmin": True, "activity": str(act)[:200]},
-                        )
-                    )
-            except Exception as e:
-                log_error(f"Garmin API error fetching activities for {current_date.date()}", exc=e)
-            current_date += timedelta(days=1)
+        for act in raw_activities or []:
+            if not isinstance(act, dict):
+                continue
+            act_type = act.get("activityType")
+            act_sport = act_type.get("typeKey") if isinstance(act_type, dict) else None
+            if sport_type and act_sport != sport_type:
+                continue
+            start_time = None
+            raw_start = act.get("startTimeLocal") or act.get("startTimeGMT")
+            if raw_start:
+                try:
+                    start_time = datetime.fromisoformat(str(raw_start))
+                except Exception:
+                    continue
+            duration = act.get("duration") or 0
+            avg_speed = act.get("averageSpeed") or 0
+            activities.append(
+                Activity(
+                    activity_id=str(act.get("activityId", "")),
+                    name=act.get("activityName") or "Unknown",
+                    sport_type=act_sport or "unknown",
+                    start_time=start_time or start_date,
+                    duration_seconds=int(duration) if duration else 0,
+                    distance_meters=act.get("distance"),
+                    calories=act.get("calories"),
+                    heart_rate_avg=act.get("averageHR"),
+                    heart_rate_max=act.get("maxHR"),
+                    power_avg=act.get("avgPower") or act.get("averagePower"),
+                    pace_sec_per_km=mps_to_pace_sec_per_km(avg_speed) if avg_speed else None,
+                    elevation_gain=act.get("elevationGain"),
+                    raw_data={"garmin": True, "activity": act},
+                )
+            )
         return activities
 
     def get_daily_summary(self, date: datetime) -> Optional[DailySummary]:
         try:
             garth.resume(GARTH_HOME)
-            summary = garth.DailySummary.get(date.strftime("%Y-%m-%d"))
-            if not summary or isinstance(summary, list):
+            summary = garth.get_user_summary(date.strftime("%Y-%m-%d"))
+            if not summary or not isinstance(summary, dict):
                 return None
             activities = self.get_activities(date, date)
             total_duration = sum(a.duration_seconds for a in activities)
             total_distance = sum(a.distance_meters or 0 for a in activities) / 1000
             total_calories = sum(a.calories or 0 for a in activities)
-            status = getattr(summary, "training_status", {})
+            status = summary.get("trainingStatus") or {}
             ctl = status.get("ctl", 0) if isinstance(status, dict) else 0
             atl = status.get("atl", 0) if isinstance(status, dict) else 0
             tsb = ctl - atl if ctl and atl else 0
-            trimp = getattr(summary, "hr_trimp", 0)
+            trimp = summary.get("hrTrimp", 0) or 0
             return DailySummary(
                 date=date,
                 ctl=float(ctl),

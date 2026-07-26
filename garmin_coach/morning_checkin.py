@@ -72,7 +72,7 @@ def main() -> None:
     ensure_dirs()
     if not resume_garth():
         raise SystemExit(
-            "No Garmin session. Run: pip install garth && garth login your@email.com"
+            "No Garmin session. Run: garmin-coach connect-garmin"
         )
 
     raw = fetch_morning_metrics(args.date)

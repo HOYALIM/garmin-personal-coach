@@ -230,14 +230,11 @@ def test_setup_wizard_helpers_and_run(monkeypatch, tmp_path, capsys):
         "swimming",
     ]
 
-    monkeypatch.setattr(
-        setup_wizard.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0)
-    )
+    monkeypatch.setattr("garmin_coach.activity_fetch.resume_garth", lambda: True)
     assert setup_wizard.test_garth_login("a@example.com") is True
     monkeypatch.setattr(
-        setup_wizard.subprocess,
-        "run",
-        lambda *args, **kwargs: (_ for _ in ()).throw(FileNotFoundError()),
+        "garmin_coach.activity_fetch.resume_garth",
+        lambda: (_ for _ in ()).throw(FileNotFoundError()),
     )
     assert setup_wizard.test_garth_login("a@example.com") is False
 
@@ -353,18 +350,13 @@ def test_wizard_validation_and_config(monkeypatch, tmp_path, capsys):
     assert wizard.prompt_optional("Optional", default="x") == "x"
     assert wizard.prompt_optional("Optional", default="x") == "value"
 
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "garth",
-        SimpleNamespace(
-            resume=lambda home: True, connectapi=lambda path, max_retries=1: {"ok": True}
-        ),
-    )
+    from garmin_coach.adapters.garmin.client import garmin_client
+
+    monkeypatch.setattr(garmin_client, "resume", lambda home: True)
+    monkeypatch.setattr(garmin_client, "connectapi", lambda path, **kwargs: {"ok": True})
     assert wizard._check_garmin_connection() is True
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "garth",
-        SimpleNamespace(resume=lambda home: (_ for _ in ()).throw(RuntimeError("nope"))),
+    monkeypatch.setattr(
+        garmin_client, "resume", lambda home: (_ for _ in ()).throw(RuntimeError("nope"))
     )
     assert wizard._check_garmin_connection() is False
 

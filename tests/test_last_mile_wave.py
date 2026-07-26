@@ -32,19 +32,20 @@ def test_last_mile_wave(monkeypatch, tmp_path):
     )
     assert fetcher.combined_profile() is None
 
-    act = SimpleNamespace(
-        activity_type=SimpleNamespace(type_key="running"),
-        start_time_local="2026-03-29T07:00:00",
-        distance=1000,
-        duration=60,
-        activity_id=1,
-        activity_name="Run",
-    )
+    act = {
+        "activityType": {"typeKey": "running"},
+        "startTimeLocal": "2026-03-29T07:00:00",
+        "distance": 1000,
+        "duration": 60,
+        "activityId": 1,
+        "activityName": "Run",
+    }
     monkeypatch.setattr(
         garmin,
         "garth",
         SimpleNamespace(
-            resume=lambda home: True, DailySummary=SimpleNamespace(get=lambda d: [act])
+            resume=lambda home: True,
+            get_activities_by_date=lambda s, e, t=None: [act],
         ),
     )
     activities = garmin.GarminAdapter().get_activities(datetime(2026, 3, 29), datetime(2026, 3, 29))
@@ -52,7 +53,7 @@ def test_last_mile_wave(monkeypatch, tmp_path):
     monkeypatch.setattr(
         garmin,
         "garth",
-        SimpleNamespace(resume=lambda home: True, DailySummary=SimpleNamespace(get=lambda d: [])),
+        SimpleNamespace(resume=lambda home: True, get_user_summary=lambda d: {}),
     )
     assert garmin.GarminAdapter().get_daily_summary(datetime(2026, 3, 29)) is None
 
@@ -205,6 +206,23 @@ def test_last_mile_wave(monkeypatch, tmp_path):
         "sys.argv", ["morning_checkin", "--date", "2026-03-29", "--phase", "final", "--pain"]
     )
     assert morning.parse_args().phase == "final"
+    # runpy re-executes the module, so patch the underlying activity_fetch
+    # functions it re-imports rather than morning.main.
+    import garmin_coach.activity_fetch as activity_fetch
+
+    monkeypatch.setattr(activity_fetch, "resume_garth", lambda: True)
+    monkeypatch.setattr(
+        activity_fetch,
+        "fetch_morning_metrics",
+        lambda target_date: {
+            "sleep_hours": 7.0,
+            "resting_hr": 50,
+            "body_battery": 70,
+            "training_readiness": 60,
+            "hrv_status": "balanced",
+            "raw": {},
+        },
+    )
     monkeypatch.setattr(morning, "main", lambda: None)
     runpy.run_module("garmin_coach.morning_checkin", run_name="__main__")
 

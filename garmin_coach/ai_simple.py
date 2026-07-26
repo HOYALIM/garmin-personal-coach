@@ -1,10 +1,9 @@
 import importlib
-import json
 import os
 from typing import Optional
 
+from garmin_coach import ai_cli
 from garmin_coach.logging_config import log_warning
-
 
 # Stable default models (tested and working)
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
@@ -53,6 +52,10 @@ class AICoach:
             return "openai"
         if os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"):
             return "gemini"
+        # Zero-config fallback: a locally installed, already-authenticated
+        # AI CLI (Claude Code / Gemini CLI / Codex) needs no API key at all.
+        if ai_cli.detect_cli() is not None:
+            return "cli"
         return "none"
 
     def _resolve_api_key(self, explicit_key: Optional[str]) -> Optional[str]:
@@ -88,7 +91,7 @@ class AICoach:
         return ""
 
     def generate_response(self, message: str, context: dict) -> Optional[str]:
-        if not self.api_key:
+        if not self.api_key and self.provider != "cli":
             return None
 
         system_prompt = self._build_system_prompt(context)
@@ -100,6 +103,8 @@ class AICoach:
             return self._call_anthropic(system_prompt, user_prompt)
         elif self.provider == "gemini":
             return self._call_gemini(system_prompt, user_prompt)
+        elif self.provider == "cli":
+            return self._call_cli(system_prompt, user_prompt)
 
         return None
 
@@ -112,15 +117,33 @@ class AICoach:
         tsb = context.get("tsb", 0)
         activities = context.get("activities_today", 0)
 
+        # PRD v3.0 Trust axis: never let the model call stale numbers "current".
+        age_days = context.get("load_age_days")
+        # Prefer the last real data date; snapshot "date" is just the day the
+        # decay was evaluated for and is always ~today.
+        load_date = context.get("last_data_date") or context.get("date")
+        as_of = f" (as of {load_date})" if load_date else ""
+        if isinstance(age_days, int) and age_days > 1:
+            heading = f"Training metrics{as_of} — {age_days} DAYS OLD"
+            staleness_rule = (
+                f"\nIMPORTANT: these metrics are {age_days} days old. Tell the user the data "
+                "is stale and must be refreshed; never present it as today's condition. "
+                "If the user states different current numbers, trust the user over this data.\n"
+            )
+        else:
+            heading = f"Current training metrics{as_of}"
+            staleness_rule = ""
+
         return f"""You are a knowledgeable, supportive endurance sports coach.
 
 {name_str}
-Current training metrics:
+{heading}:
 - CTL (42-day fitness): {ctl:.1f}
 - ATL (7-day fatigue): {atl:.1f}
 - TSB (form): {tsb:.1f}
 - Activities today: {activities}
-
+{staleness_rule}
+Always reply in the same language the user writes in.
 Coach the user in a warm, encouraging tone. Be specific with numbers and recommendations.
 Keep responses concise (2-3 sentences for quick questions, up to 1 paragraph for detailed advice."""
 
@@ -128,6 +151,12 @@ Keep responses concise (2-3 sentences for quick questions, up to 1 paragraph for
         tsb = context.get("tsb", 0)
 
         prompt = f"User said: {message}\n\n"
+
+        # A TSB from weeks ago says nothing about today's fatigue; asserting
+        # it here would contradict the staleness warning in the system prompt.
+        age_days = context.get("load_age_days")
+        if isinstance(age_days, int) and age_days > 7:
+            return prompt
 
         if tsb < -25:
             prompt += (
@@ -174,6 +203,14 @@ Keep responses concise (2-3 sentences for quick questions, up to 1 paragraph for
         except Exception as e:
             log_warning(f"Anthropic API call failed: {e}")
             return None
+
+    def _call_cli(self, system: str, user: str) -> Optional[str]:
+        # self.model doubles as the preferred CLI name (e.g. "claude").
+        preferred = self.model if self.model in ai_cli.CLI_COMMANDS else None
+        coach = ai_cli.CLICoach(preferred)
+        if not coach.available:
+            return None
+        return coach.generate(f"{system}\n\n{user}")
 
     def _call_gemini(self, system: str, user: str) -> Optional[str]:
         try:

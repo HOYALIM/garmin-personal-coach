@@ -25,6 +25,56 @@ It is **not** yet a dashboard, mobile app, or food-photo calorie app.
 
 ---
 
+## Garmin Data We Can Pull
+
+Everything below is fetched through `garminconnect` (≥0.3.6) — the successor to `garth`,
+which Garmin's 2026-03 Cloudflare/TLS changes broke for automated logins. `garminconnect`
+works around this with browser TLS impersonation. Login once with `garmin-coach connect-garmin`;
+the refresh token keeps working for ~30 days without asking again — **avoid re-login loops**,
+Garmin now rate-limits login attempts per account, not per IP.
+
+| Category | Data | Coaching use | Status |
+|----------|------|---------------|--------|
+| **Readiness/Recovery** | Training Readiness (Garmin's own score), HRV + 7-day status, Body Battery, daily Stress, Resting HR + baseline | Feeds `ReadinessScore`; primary gate for the daily guardrails | ✅ pulled |
+| **Sleep** | Sleep score, stages (deep/REM/light/awake), total duration | Recovery quality → intensity adjustment | ✅ pulled |
+| **Training load (Garmin-native)** | Training Status, VO2max / fitness age, Race Predictions, Lactate Threshold, Endurance Score, Hill Score, Running Tolerance, Cycling FTP | Cross-check against our own CTL/ATL/TSB | 🔲 not yet wired into snapshot |
+| **Activities** | Full activity list + per-activity detail: laps, splits, HR/power time-in-zone, gear used, weather, exercise sets (strength) | Session analysis, PRD training-load math | ✅ pulled (list + detail) |
+| **Body composition** | Weight, body fat %, muscle/bone mass, daily weigh-ins | Nutrition coaching context | ✅ pulled |
+| **Daily activity** | Steps, floors climbed, intensity minutes (weekly too), daily/weekly stress rollups | General fitness picture between workouts | 🔲 not yet wired into snapshot |
+| **Blood/health extras** | SpO2, respiration rate, blood pressure, hydration | Altitude/illness detection, hydration nudges | ✅ SpO2/respiration pulled; BP/hydration 🔲 roadmap |
+| **Gear** | Gear list, per-gear activity stats, defaults | Shoe/bike mileage tracking (injury-prevention angle) | 🔲 roadmap |
+| **Goals/records/badges** | Personal records, goals, badges, challenges | Motivational hooks, PR-based coaching | 🔲 roadmap |
+| **Cycle/lifestyle** | Menstrual cycle data, pregnancy summary | Cycle-aware training adjustments | 🔲 roadmap (opt-in only) |
+
+Not pulled by design: nutrition logging fields native to Garmin Connect (we run our own
+`nutrition/` engine instead — see below) and golf-specific data (out of scope for endurance coaching).
+
+References used to compile this table: [python-garminconnect](https://github.com/cyberjunky/python-garminconnect) (the client library itself)
+and [garmin-grafana](https://github.com/arpanghosh8453/garmin-grafana) (a self-hosted dashboard pulling nearly the same surface into Grafana).
+
+## Strava Data We Can Pull
+
+Strava is **supplemental only** — Garmin stays the source of truth for training load. Full activity
+history back to account creation is fetched via `/activities` with page-based pagination (100/page);
+this already covers years of history for any athlete, not just recent weeks. As of Strava's June 2026
+developer-program changes (Standard tier now requires a Strava subscription, rate limits raised to
+200/15min & 2000/day, intermediary-platform routing banned), the adapter backs off on `429` using the
+`Retry-After` header instead of silently truncating a backfill — see
+[garmin_coach/adapters/strava.py](garmin_coach/adapters/strava.py).
+
+To pull your **entire** Strava history in one run:
+
+```bash
+garmin-coach strava-sync --days 3650   # ~10 years; adjust to your account age
+```
+
+Design references: [running_page](https://github.com/yihong0618/running_page) (multi-source personal
+activity aggregator, same "one athlete, all their data" model we follow) and
+[statistics-for-strava](https://github.com/robiningelbrecht/statistics-for-strava) (self-hosted
+single-athlete Strava dashboard).
+
+---
+
 ## Quick Start
 
 ### 1. Install
@@ -46,8 +96,11 @@ pip install -e .[all]
 ### 2. Connect Garmin
 
 ```bash
-garth login your@email.com
+garmin-coach connect-garmin --email your@email.com
 ```
+
+(`garth login` no longer works — Garmin's 2026 Cloudflare changes broke it. This project now
+uses `garminconnect` instead; see [Garmin Data We Can Pull](#garmin-data-we-can-pull) below.)
 
 ### 3. Run Setup
 

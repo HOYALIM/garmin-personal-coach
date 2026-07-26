@@ -315,24 +315,23 @@ def test_fetch_and_adapter_remaining_paths(monkeypatch, tmp_path):
             "cyclingSettings": {"ftp": 250},
             "sports": [{"sportType": {"typeKey": "running"}}],
         },
-        DailySummary=SimpleNamespace(
-            get=lambda d: [
-                SimpleNamespace(
-                    activity_type=SimpleNamespace(type_key="running"),
-                    start_time_local=datetime(2026, 3, 29, 7, 0),
-                    distance=5000,
-                    duration=1800,
-                    calories=300,
-                    average_heart_rate=150,
-                    max_heart_rate=170,
-                    average_power=220,
-                    average_speed=3.5,
-                    elevation_gain=50,
-                    activity_id=1,
-                    activity_name="Run",
-                )
-            ]
-        ),
+        get_activities_by_date=lambda s, e, t=None: [
+            {
+                "activityType": {"typeKey": "running"},
+                "startTimeLocal": "2026-03-29 07:00:00",
+                "distance": 5000,
+                "duration": 1800,
+                "calories": 300,
+                "averageHR": 150,
+                "maxHR": 170,
+                "avgPower": 220,
+                "averageSpeed": 3.5,
+                "elevationGain": 50,
+                "activityId": 1,
+                "activityName": "Run",
+            }
+        ],
+        get_user_summary=lambda d: {},
     )
     monkeypatch.setattr(garmin, "garth", fake_garth)
     adapter = garmin.GarminAdapter()

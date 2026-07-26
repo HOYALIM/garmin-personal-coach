@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 
@@ -109,7 +109,9 @@ def test_sync_garmin_training_load_stale_cleanup_respects_window(monkeypatch, tm
     monkeypatch.setattr(sync, "INTEGRATIONS_DIR", str(tmp_path))
     state_file = tmp_path / "garmin_sync_state.json"
     monkeypatch.setattr(sync, "GARMIN_SYNC_STATE_FILE", str(state_file))
-    state_file.write_text(json.dumps({"days": {"2026-03-29": {"fingerprint": "old"}}}))
+    # Stale day must be inside the sync window, so compute it relative to now.
+    stale_day = (datetime.now() - timedelta(days=2)).date().isoformat()
+    state_file.write_text(json.dumps({"days": {stale_day: {"fingerprint": "old"}}}))
 
     removed = []
 
@@ -118,7 +120,7 @@ def test_sync_garmin_training_load_stale_cleanup_respects_window(monkeypatch, tm
             self.session_calculator = SimpleNamespace(calculate_trimp=lambda **kwargs: 20.0)
 
         def get_session(self, d):
-            if d.isoformat() == "2026-03-29":
+            if d.isoformat() == stale_day:
                 return SimpleNamespace(description="[garmin-sync] old batch")
             return None
 
@@ -148,4 +150,4 @@ def test_sync_garmin_training_load_stale_cleanup_respects_window(monkeypatch, tm
     monkeypatch.setattr(sync, "GarminAdapter", FakeAdapter)
     result = sync.sync_garmin_training_load(days=7, dry_run=False)
     assert result["removed"] == 1
-    assert removed == ["2026-03-29"]
+    assert removed == [stale_day]

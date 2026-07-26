@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1062,13 +1063,15 @@ def test_runtime_report_uses_user_scoped_database_data():
     from garmin_coach.models.coaching import WeeklyPlan
 
     db = GarminCoachDatabase(":memory:")
+    # The report covers the last 30 days, so the fixture date must be recent.
+    recent_ts = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%dT10:00:00")
     db.save_activity(
         "u1",
         "a1",
-        "2026-04-07T10:00:00",
+        recent_ts,
         {
             "activity_id": "a1",
-            "start_time": "2026-04-07T10:00:00",
+            "start_time": recent_ts,
             "distance_km": 10.0,
             "duration_min": 50.0,
         },
@@ -1076,10 +1079,10 @@ def test_runtime_report_uses_user_scoped_database_data():
     db.save_activity(
         "u2",
         "a2",
-        "2026-04-07T10:00:00",
+        recent_ts,
         {
             "activity_id": "a2",
-            "start_time": "2026-04-07T10:00:00",
+            "start_time": recent_ts,
             "distance_km": 42.0,
             "duration_min": 180.0,
         },

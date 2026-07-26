@@ -1,13 +1,14 @@
 """Natural language message handler with real data and AI."""
 
 import os
+from datetime import date
 from typing import Any, Optional
 
 from garmin_coach.handler.intent import Intent, detect_intent
 from garmin_coach.handler.templates import ResponseTemplate
-from garmin_coach.training_load_manager import get_training_load_manager
-from garmin_coach.rate_limit import HANDLER_LIMITER
 from garmin_coach.logging_config import log_warning
+from garmin_coach.rate_limit import HANDLER_LIMITER
+from garmin_coach.training_load_manager import get_training_load_manager
 
 
 class RateLimitError(Exception):
@@ -50,6 +51,16 @@ def _normalize_config(config: dict) -> dict:
     return config
 
 
+def _days_since(date_str: Any) -> int | None:
+    """Age in days of an ISO date string, or None if unusable."""
+    if not isinstance(date_str, str):
+        return None
+    try:
+        return (date.today() - date.fromisoformat(date_str)).days
+    except ValueError:
+        return None
+
+
 def _get_real_context() -> dict:
     context = {}
 
@@ -63,6 +74,12 @@ def _get_real_context() -> dict:
         manager = get_training_load_manager()
         load_context = manager.get_context()
         context.update(load_context)
+        # How old this training load actually is. Without it the coach
+        # presented months-old numbers as "current data" (observed live:
+        # April data cited on 25 July).
+        # Age of the newest REAL data point, not of the computed snapshot —
+        # see TrainingLoadManager.last_data_date for why those differ.
+        context["load_age_days"] = _days_since(load_context.get("last_data_date"))
 
         if context.get("ctl", 0) == 0 and context.get("atl", 0) == 0:
             context["has_data"] = False
@@ -100,7 +117,15 @@ class MessageHandler:
                 or os.getenv("GOOGLE_API_KEY")
                 or os.getenv("GEMINI_API_KEY")
             )
-            if explicit_api_key or provider or model or env_api_key:
+            local_cli_available = False
+            if not (explicit_api_key or provider or model or env_api_key):
+                try:
+                    from garmin_coach import ai_cli
+
+                    local_cli_available = ai_cli.detect_cli() is not None
+                except Exception:
+                    local_cli_available = False
+            if explicit_api_key or provider or model or env_api_key or local_cli_available:
                 try:
                     from garmin_coach.ai_simple import AICoach
 

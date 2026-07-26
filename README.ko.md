@@ -78,8 +78,14 @@ pip install -e .[all]
 ### 2. Garmin 연결
 
 ```bash
-garth login your@email.com
+garmin-coach connect-garmin --email your@email.com
 ```
+
+(`garth login`은 더 이상 동작하지 않습니다 — 2026년 Garmin의 Cloudflare 정책 변경으로 garth가
+차단되어 `garminconnect` 라이브러리로 전환했습니다. 최초 로그인 후 리프레시 토큰으로 약 30일간
+재인증 없이 유지되니, 재로그인을 반복하지 마세요 — 계정 단위로 rate limit이 걸립니다.)
+
+가져올 수 있는 Garmin/Strava 데이터 전체 목록은 [영문 README의 데이터 표](README.md#garmin-data-we-can-pull)를 참고하세요.
 
 ### 3. 초기 설정 실행
 

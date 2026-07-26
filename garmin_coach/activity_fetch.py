@@ -1,29 +1,42 @@
-"""Garmin data fetching layer (garth adapter)."""
+"""Garmin data fetching layer (legacy shim over the garminconnect facade).
+
+Historically this module called garth directly. garth is dead (Garmin's 2026
+auth changes), so it now delegates to
+:mod:`garmin_coach.adapters.garmin.client`. Public function signatures are
+unchanged so morning_checkin / coach_engine / telegram_bot keep working.
+
+Payload extraction is dual-shape: it accepts both attribute-style objects
+(garth's typed classes, still used by the test-suite fixtures) and the plain
+camelCase dicts garminconnect returns.
+"""
 
 import os
-import warnings
 from datetime import date, datetime
 from typing import Any
 
-with warnings.catch_warnings():
-    warnings.filterwarnings(
-        "ignore",
-        category=DeprecationWarning,
-        message=r"Garth is deprecated and no longer maintained.*",
-    )
-    import garth
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+from garmin_coach.adapters.garmin.client import garmin_client
 from garmin_coach.logging_config import log_error, log_warning
 
+try:
+    from garminconnect import (
+        GarminConnectConnectionError,
+        GarminConnectTooManyRequestsError,
+    )
 
-GARTH_HOME = os.path.expanduser(os.getenv("GARTH_HOME", "~/.garth"))
+    _RETRYABLE_API_EXCEPTIONS: tuple[type[Exception], ...] = (
+        GarminConnectConnectionError,
+        GarminConnectTooManyRequestsError,
+    )
+except Exception:  # pragma: no cover - garminconnect always present in prod
+    _RETRYABLE_API_EXCEPTIONS = ()
 
-GARTH_RETRYABLE_EXCEPTIONS = tuple(
-    exc
-    for exc in (getattr(garth, "GarthException", None), ConnectionError, TimeoutError)
-    if exc is not None
-) or (Exception,)
+GARTH_HOME = os.path.expanduser(
+    os.getenv("GARMINTOKENS") or os.getenv("GARTH_HOME") or "~/.garminconnect"
+)
+
+GARTH_RETRYABLE_EXCEPTIONS = _RETRYABLE_API_EXCEPTIONS + (ConnectionError, TimeoutError)
 
 
 @retry(
@@ -40,9 +53,23 @@ def _execute_garth_call(operation: str, fn):
         raise
 
 
+def _field(obj: Any, *names: str, default: Any = None) -> Any:
+    """Read the first present field from a dict key or object attribute."""
+    if obj is None:
+        return default
+    for name in names:
+        if isinstance(obj, dict):
+            value = obj.get(name)
+        else:
+            value = getattr(obj, name, None)
+        if value is not None:
+            return value
+    return default
+
+
 def resume_garth() -> bool:
     try:
-        _execute_garth_call("resume session", lambda: garth.resume(GARTH_HOME))
+        _execute_garth_call("resume session", lambda: garmin_client.resume(GARTH_HOME))
         return True
     except Exception as exc:
         log_error("Failed to resume Garmin session", exc=exc)
@@ -52,7 +79,8 @@ def resume_garth() -> bool:
 def safe_get_daily_summary(target_date: str) -> Any:
     try:
         return _execute_garth_call(
-            f"daily summary for {target_date}", lambda: garth.DailySummary.get(target_date)
+            f"daily summary for {target_date}",
+            lambda: garmin_client.get_user_summary(target_date),
         )
     except Exception as exc:
         log_error(f"Failed to fetch daily summary for {target_date}", exc=exc)
@@ -62,7 +90,8 @@ def safe_get_daily_summary(target_date: str) -> Any:
 def safe_get_sleep(target_date: str) -> Any:
     try:
         return _execute_garth_call(
-            f"sleep data for {target_date}", lambda: garth.SleepData.get(target_date)
+            f"sleep data for {target_date}",
+            lambda: garmin_client.get_sleep_data(target_date),
         )
     except Exception as exc:
         log_error(f"Failed to fetch sleep data for {target_date}", exc=exc)
@@ -72,7 +101,8 @@ def safe_get_sleep(target_date: str) -> Any:
 def safe_get_body_battery(target_date: str) -> Any:
     try:
         return _execute_garth_call(
-            f"body battery for {target_date}", lambda: garth.BodyBatteryData.get(target_date)
+            f"body battery for {target_date}",
+            lambda: garmin_client.get_body_battery(target_date),
         )
     except Exception as exc:
         log_error(f"Failed to fetch body battery for {target_date}", exc=exc)
@@ -83,7 +113,7 @@ def safe_get_training_readiness(target_date: str) -> Any:
     try:
         return _execute_garth_call(
             f"training readiness for {target_date}",
-            lambda: garth.MorningTrainingReadinessData.get(target_date),
+            lambda: garmin_client.get_training_readiness(target_date),
         )
     except Exception as exc:
         log_error(f"Failed to fetch training readiness for {target_date}", exc=exc)
@@ -93,7 +123,8 @@ def safe_get_training_readiness(target_date: str) -> Any:
 def safe_get_daily_hr(target_date: str) -> Any:
     try:
         return _execute_garth_call(
-            f"daily heart rate for {target_date}", lambda: garth.DailyHeartRate.get(target_date)
+            f"daily heart rate for {target_date}",
+            lambda: garmin_client.get_heart_rates(target_date),
         )
     except Exception as exc:
         log_error(f"Failed to fetch HR for {target_date}", exc=exc)
@@ -102,9 +133,11 @@ def safe_get_daily_hr(target_date: str) -> Any:
 
 def safe_get_activities(limit: int = 10) -> list[Any]:
     try:
-        return _execute_garth_call(
-            f"activities list limit={limit}", lambda: garth.Activity.list(limit=limit)
+        result = _execute_garth_call(
+            f"activities list limit={limit}",
+            lambda: garmin_client.get_activities(0, limit),
         )
+        return result if isinstance(result, list) else []
     except Exception as exc:
         log_error(f"Failed to fetch activities (limit={limit})", exc=exc)
         return []
@@ -120,6 +153,55 @@ def extract_sleep_hours(sleep_data: Any) -> float | None:
     return None
 
 
+def _extract_sleep_raw(sleep_obj: Any) -> dict[str, Any] | None:
+    dto = _field(sleep_obj, "daily_sleep_dto", "dailySleepDTO")
+    if not dto:
+        return None
+    scores = _field(dto, "sleep_scores", "sleepScores")
+    overall = _field(scores, "overall") if scores else None
+    return {
+        "sleepTimeSeconds": _field(dto, "sleep_time_seconds", "sleepTimeSeconds"),
+        "deepSleepSeconds": _field(dto, "deep_sleep_seconds", "deepSleepSeconds"),
+        "lightSleepSeconds": _field(dto, "light_sleep_seconds", "lightSleepSeconds"),
+        "remSleepSeconds": _field(dto, "rem_sleep_seconds", "remSleepSeconds"),
+        "awakeSleepSeconds": _field(dto, "awake_sleep_seconds", "awakeSleepSeconds"),
+        "awakeCount": _field(dto, "awake_count", "awakeCount"),
+        "overallScore": _field(overall, "value") if overall else None,
+        "overallQualifier": (
+            _field(overall, "qualifier_key", "qualifierKey") if overall else None
+        ),
+    }
+
+
+def _extract_body_battery(summary: Any, body_battery_obj: Any) -> Any:
+    value = _field(
+        summary,
+        "body_battery_at_wake_time",
+        "bodyBatteryAtWakeTime",
+        "bodyBatteryMostRecentValue",
+    )
+    if value is not None or not isinstance(body_battery_obj, list) or not body_battery_obj:
+        return value
+    impacts = []
+    samples = []
+    for event in body_battery_obj:
+        impact = getattr(getattr(event, "event", None), "body_battery_impact", None)
+        if impact is not None:
+            impacts.append(impact)
+        if isinstance(event, dict):
+            for point in event.get("bodyBatteryValuesArray") or []:
+                if isinstance(point, (list, tuple)) and len(point) > 1 and point[1] is not None:
+                    samples.append(point[1])
+    try:
+        if impacts:
+            return max(impacts)
+        if samples:
+            return samples[-1]
+    except Exception as exc:
+        log_warning("Failed to extract body battery from Garmin payload", exc=exc)
+    return None
+
+
 def fetch_morning_metrics(target_date: str) -> dict[str, Any]:
     summary = safe_get_daily_summary(target_date)
     sleep_obj = safe_get_sleep(target_date)
@@ -127,52 +209,25 @@ def fetch_morning_metrics(target_date: str) -> dict[str, Any]:
     readiness_obj = safe_get_training_readiness(target_date)
     daily_hr_obj = safe_get_daily_hr(target_date)
 
-    sleep_hours = None
-    sleep_raw = None
-    if sleep_obj and getattr(sleep_obj, "daily_sleep_dto", None):
-        dto = sleep_obj.daily_sleep_dto
-        sleep_raw = {
-            "sleepTimeSeconds": dto.sleep_time_seconds,
-            "deepSleepSeconds": dto.deep_sleep_seconds,
-            "lightSleepSeconds": dto.light_sleep_seconds,
-            "remSleepSeconds": dto.rem_sleep_seconds,
-            "awakeSleepSeconds": dto.awake_sleep_seconds,
-            "awakeCount": dto.awake_count,
-            "overallScore": getattr(dto.sleep_scores.overall, "value", None)
-            if dto.sleep_scores
-            else None,
-            "overallQualifier": getattr(dto.sleep_scores.overall, "qualifier_key", None)
-            if dto.sleep_scores
-            else None,
-        }
-        sleep_hours = extract_sleep_hours(sleep_raw)
+    sleep_raw = _extract_sleep_raw(sleep_obj)
+    sleep_hours = extract_sleep_hours(sleep_raw) if sleep_raw else None
 
-    body_battery_value = getattr(summary, "body_battery_at_wake_time", None) if summary else None
-    if body_battery_value is None and isinstance(body_battery_obj, list) and body_battery_obj:
-        try:
-            body_battery_value = max(
-                event.event.body_battery_impact
-                for event in body_battery_obj
-                if getattr(getattr(event, "event", None), "body_battery_impact", None) is not None
-            )
-        except Exception as exc:
-            log_warning("Failed to extract body battery from Garmin payload", exc=exc)
-            body_battery_value = None
-
-    readiness_value = getattr(readiness_obj, "score", None) if readiness_obj else None
-    hrv_feedback = getattr(readiness_obj, "hrv_factor_feedback", None) if readiness_obj else None
+    if isinstance(readiness_obj, list):
+        readiness_obj = readiness_obj[0] if readiness_obj else None
+    readiness_value = _field(readiness_obj, "score")
+    hrv_feedback = _field(
+        readiness_obj, "hrv_factor_feedback", "hrvFactorFeedback", "hrvFactor"
+    )
     hrv_status = hrv_feedback.lower() if isinstance(hrv_feedback, str) and hrv_feedback else None
+
+    resting_hr = _field(daily_hr_obj, "resting_heart_rate", "restingHeartRate")
+    if resting_hr is None:
+        resting_hr = _field(summary, "resting_heart_rate", "restingHeartRate")
 
     return {
         "sleep_hours": sleep_hours,
-        "resting_hr": (
-            getattr(daily_hr_obj, "resting_heart_rate", None)
-            if daily_hr_obj
-            else getattr(summary, "resting_heart_rate", None)
-            if summary
-            else None
-        ),
-        "body_battery": body_battery_value,
+        "resting_hr": resting_hr,
+        "body_battery": _extract_body_battery(summary, body_battery_obj),
         "training_readiness": readiness_value,
         "hrv_status": hrv_status,
         "raw": {
@@ -198,43 +253,48 @@ def fetch_recent_activities(
     raw_activities = safe_get_activities(limit=limit_count)
     results = []
     for act in raw_activities:
-        type_key = ""
-        if hasattr(act, "activity_type") and act.activity_type:
-            type_key = getattr(act.activity_type, "type_key", "") or ""
+        act_type = _field(act, "activity_type", "activityType")
+        type_key = (_field(act_type, "type_key", "typeKey", default="") or "") if act_type else ""
 
         start_local = None
-        if hasattr(act, "start_time_local") and act.start_time_local:
-            st = act.start_time_local
-            start_local = st.isoformat() if isinstance(st, datetime) else str(st)
+        raw_start = _field(act, "start_time_local", "startTimeLocal")
+        if raw_start:
+            start_local = (
+                raw_start.isoformat() if isinstance(raw_start, datetime) else str(raw_start)
+            )
 
-        distance_m = getattr(act, "distance", None)
+        distance_m = _field(act, "distance")
         distance_km = round(distance_m / 1000, 2) if distance_m else None
 
-        duration_s = getattr(act, "duration", None)
+        duration_s = _field(act, "duration")
         duration_min = round(duration_s / 60, 1) if duration_s else None
 
-        avg_speed = getattr(act, "average_speed", None)
+        avg_speed = _field(act, "average_speed", "averageSpeed")
         pace_str = mps_to_pace_str(avg_speed) if avg_speed else None
 
-        avg_hr = getattr(act, "average_hr", None)
+        avg_hr = _field(act, "average_hr", "averageHR")
         if avg_hr is not None:
             avg_hr = int(avg_hr)
 
         item = {
-            "activity_id": str(getattr(act, "activity_id", "") or ""),
+            "activity_id": str(_field(act, "activity_id", "activityId", default="") or ""),
             "type": type_key,
             "start_time": start_local,
             "distance_km": distance_km,
             "duration_min": duration_min,
             "avg_pace": pace_str,
             "avg_hr": avg_hr,
-            "calories": getattr(act, "calories", None),
-            "activity_name": getattr(act, "activity_name", "") or "",
+            "calories": _field(act, "calories"),
+            "activity_name": _field(act, "activity_name", "activityName", default="") or "",
         }
 
         if isinstance(limit, date):
             try:
-                activity_date = datetime.fromisoformat(start_local).date() if start_local else None
+                activity_date = (
+                    datetime.fromisoformat(start_local.replace(" ", "T")).date()
+                    if start_local
+                    else None
+                )
             except Exception:
                 activity_date = None
             if activity_date is None:

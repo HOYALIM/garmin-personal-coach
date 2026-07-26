@@ -45,7 +45,7 @@ def _save_state(state: dict[str, Any]) -> None:
 def _aggregate_garmin_days(days: int, window_start_date=None) -> list[CanonicalDailyActivityBatch]:
     adapter = GarminAdapter()
     if not adapter.is_authenticated():
-        raise RuntimeError("Garmin is not authenticated. Run 'garth login' first.")
+        raise RuntimeError("Garmin is not authenticated. Run 'garmin-coach connect-garmin' first.")
 
     if window_start_date is None:
         window_start_date = (datetime.now() - timedelta(days=days)).date()

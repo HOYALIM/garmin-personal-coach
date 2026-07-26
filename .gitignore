@@ -9,4 +9,11 @@ data/
 logs/
 snapshots/
 *.json
+# Test fixtures captured from a real Garmin account (sanitized: ids zeroed,
+# long timeseries truncated). These MUST be committed — they are the ground
+# truth parsers are validated against. Without them, parsers get written and
+# tested against imagined shapes, which is exactly how every health metric
+# silently parsed to None while 294 tests stayed green (2026-07-25).
+!tests/fixtures/**/*.json
 .DS_Store
+.omc/
