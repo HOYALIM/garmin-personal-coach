@@ -25,6 +25,39 @@ S-C: 레거시 상환 (독립, 상시)
 | `is_authenticated()` 네트워크 콜 제거 | 🔲 | `adapters/garmin/__init__.py:86` |
 | `get_time_series` N+1 제거 (스냅샷 캐시로 대체) | 🔲 | `adapters/garmin/__init__.py:255` |
 
+### 🚨 인시던트 (2026-07-25) — 파서가 상상한 스키마로 작성됨
+
+**증상**: 첫 실계정 실행에서 수면·스트레스·RHR·Body Battery가 전부 `None`. Readiness는
+TSB 하나(가중치 1.0)로만 계산되어 "50/100 yellow"라는 무의미한 기본값 출력. 안전 가드레일도
+입력이 없어 전부 침묵.
+
+**왜 294개 테스트가 못 잡았나**: 파서가 상상한 형태(`{"sleepScore": 85}`)로 작성됐고 테스트
+픽스처도 같은 상상으로 작성됨. 실제 Garmin은 `{"dailySleepDTO": {"sleepScores": {"overall":
+{"value": 73}}}}`를 보낸다. 파서와 테스트가 서로의 거짓을 승인하는 구조 — 외부 진실
+(실응답)만이 이 교착을 깰 수 있다.
+
+**조치 (전부 완료·실계정 검증)**:
+- ✅ 실계정 응답을 `tests/fixtures/garmin/`에 캡처 (id 0으로 치환, 타임시리즈 3개로 절단).
+  동기화된 날(`*_populated.json`)과 미동기화 날(`*.json`) 양쪽 확보 — 후자가 1급 시나리오
+- ✅ `.gitignore`의 `*.json`이 픽스처까지 제외하고 있었음 → `!tests/fixtures/**/*.json` 예외 추가.
+  이걸 놓쳤으면 CI·타 개발자에겐 픽스처가 없어 전략 자체가 무의미했음
+- ✅ `health.py` 전면 재작성: sleep→`dailySleepDTO.sleepScores.overall.value`,
+  rhr→`allMetrics.metricsMap.WELLNESS_RESTING_HEART_RATE[0].value`,
+  bb→`bodyBatteryValuesArray[[ts, level]]`, TR→list 봉투. 레거시 flat 키는 폴백으로 유지.
+  falsy 0이 `or` 체인에서 탈락하던 버그도 `_first()` 헬퍼로 제거
+- ✅ 빈 페이로드는 껍데기 객체가 아니라 `None` 반환 → `awaiting_watch_sync` 상태 신설,
+  "가져오지 못했어요"와 "아직 워치 데이터가 없어요"를 구분
+- ✅ `garmin-coach doctor` 신설 — 라이브 계약 검사(OK/EMPTY/PARSE_MISS/FAIL). 개발 중 두 번의
+  오탐을 잡아 정교화함: `sleepNeed`(측정값 아닌 권고값)와 타임시리즈 타임스탬프가
+  "데이터 있음"으로 오인되던 문제. **늑대소년이 된 doctor는 없느니만 못하다**
+- ✅ 신선도 판정 근본 수정: `snapshot.date`는 계산 대상 날짜라 항상 ~오늘 → 108일 묵은 데이터가
+  "0일 전"으로 보고됐음. `last_data_date`(마지막 실제 입력)로 교체
+- ✅ AI 프롬프트: 오래된 데이터를 "current"로 단언하던 문제 + 한국어 질문에 영어로 답하던
+  비결정성 수정. 라이브 재검증 완료
+
+**검증 (실계정 2026-07-24)**: sleep 73, stress 15, rhr 54, BB 23/충전59 →
+Readiness 6개 성분·신뢰도 high·제한요인 body_battery 특정. 수정 전 `['tsb']` 1개·low 대비 완전 복구.
+
 ## S-B. 여정 완성도
 
 - 🔲 아침 브리핑 선행-fetch: 스케줄러가 브리핑 N분 전에 `SnapshotService.get(force_refresh=True)` 호출
