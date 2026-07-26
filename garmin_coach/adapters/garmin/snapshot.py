@@ -85,13 +85,26 @@ class DailySnapshot:
     def is_empty(self) -> bool:
         return not self.present_metrics
 
+    @property
+    def awaiting_watch_sync(self) -> bool:
+        """Fetch worked, Garmin just has nothing for this day yet.
+
+        Distinct from a failed fetch: the parsers return None when a payload
+        arrives with every leaf null, which is exactly what Garmin serves for
+        a day the watch has not uploaded. Telling the user "sync your watch"
+        is right here; telling them the app is broken is not.
+        """
+        return self.is_empty and not self.errors
+
     def age(self, now: datetime | None = None) -> timedelta:
         return (now or datetime.now()) - self.fetched_at
 
     def freshness_label(self, now: datetime | None = None) -> str | None:
         """PRD v3.0 freshness contract: None / relative age / sync warning."""
+        if self.awaiting_watch_sync:
+            return "⌚ 오늘 워치 데이터가 아직 없어요 — 동기화 후 다시 확인해주세요"
         if self.is_empty:
-            return "⚠️ 워치 동기화를 확인해주세요"
+            return "⚠️ 데이터를 가져오지 못했어요 — 연결을 확인해주세요"
         age = self.age(now)
         if age < TODAY_TTL:
             return None

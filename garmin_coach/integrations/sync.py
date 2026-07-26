@@ -180,8 +180,24 @@ class GarminSyncService:
 
     @staticmethod
     def _sleep_score_from_payload(payload: dict[str, Any]) -> int | None:
+        """Read a stored sleep score out of a cached daily-health payload.
+
+        The real Garmin shape nests the score at
+        dailySleepDTO.sleepScores.overall.value; the flat keys below are the
+        legacy/cached shape. Reading only the flat keys (as this did) meant
+        recent_sleep_scores was always empty, so readiness confidence was
+        computed from zero history.
+        """
         sleep = payload.get("sleep")
-        if isinstance(sleep, dict):
+        if not isinstance(sleep, dict):
+            return None
+        dto = sleep.get("dailySleepDTO")
+        scores = (dto if isinstance(dto, dict) else sleep).get("sleepScores")
+        value = None
+        if isinstance(scores, dict):
+            overall = scores.get("overall")
+            if isinstance(overall, dict):
+                value = overall.get("value")
+        if value is None:
             value = sleep.get("sleepScore") or sleep.get("overallSleepScore")
-            return int(value) if isinstance(value, (int, float)) else None
-        return None
+        return int(value) if isinstance(value, (int, float)) else None
