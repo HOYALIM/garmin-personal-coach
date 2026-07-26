@@ -115,6 +115,13 @@ def _run_command(command):
 
         result = process_message("운동 끝")
         print(result)
+    elif cmd == "doctor":
+        from garmin_coach.doctor import run_doctor
+
+        doctor_parser = argparse.ArgumentParser(prog="garmin-coach doctor")
+        doctor_parser.add_argument("--date", default=None, help="YYYY-MM-DD (default: yesterday)")
+        doctor_args = doctor_parser.parse_args(command[1:])
+        return run_doctor(date_str=doctor_args.date)
     elif cmd == "chat":
         from garmin_coach.handler import process_message
 
